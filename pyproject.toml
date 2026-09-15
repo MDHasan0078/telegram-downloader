@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-downloader"
+version = "0.1.0"
+description = "Telegram media downloader — persistent login, resumable downloads, queue, GUI + CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "telegram-downloader" }]
+keywords = ["telegram", "downloader", "telethon", "media"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Environment :: Console",
+  "Topic :: Multimedia :: Video",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "telethon>=1.36",
+]
+
+[project.optional-dependencies]
+gui = ["flet>=0.25.0"]
+speed = ["cryptg>=0.4.0"]
+rich = ["rich>=13", "tqdm>=4.66"]
+all = ["flet>=0.25.0", "cryptg>=0.4.0", "rich>=13", "tqdm>=4.66"]
+test = ["pytest>=7", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+tg-dl = "telegram_downloader.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/MDHasan0078/telegram-downloader"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+
+[tool.flet]
+# Used by `flet build` for .apk / .dmg / .msix targets.
+# See scripts/build-*.sh for wrapper commands.
+project_name = "Telegram Downloader"
+product_name = "Telegram Downloader"
+org = "com.tgdownloader"
+company = "tgdownloader"

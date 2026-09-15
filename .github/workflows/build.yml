@@ -1,0 +1,74 @@
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[test]" && python -m pytest -q
+
+  deb:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
+          grep -E "^version" pyproject.toml
+      - run: chmod +x scripts/build-deb.sh && ./scripts/build-deb.sh
+      - name: Smoke test .deb contents
+        run: |
+          dpkg-deb -f dist/*.deb Package Version Architecture Depends
+          dpkg-deb -c dist/*.deb | grep -E "(usr/bin/tg-dl|opt/telegram-downloader)" | head -5
+      - uses: actions/upload-artifact@v4
+        with: { name: deb, path: dist/*.deb }
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          overwrite: true
+
+  apk:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - run: pip install "flet[all]" && flet doctor || true
+      - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh --debug
+      - uses: actions/upload-artifact@v4
+        with: { name: apk, path: build/apk/*.apk }
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/apk/*.apk
+          overwrite: true
+
+  dmg:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install "flet[all]" && chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: build/macos/ }
