@@ -9,6 +9,6 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 pip install -U "flet[all]" 2>&1 | tail -2
-flet build macos --project telegram_downloader.gui --module-name main
+flet build macos --project telegram_downloader.gui --module-name main --yes
 echo "App under build/macos/. Drag to /Applications or package with create-dmg:"
 echo "  brew install create-dmg && create-dmg build/*.dmg build/macos/*.app"
