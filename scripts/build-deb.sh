@@ -26,7 +26,15 @@ cat > "$PKG/opt/telegram-downloader/run.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 APP=/opt/telegram-downloader
-VENV="$APP/.venv"
+SYS_VENV="$APP/.venv"
+USER_VENV="${XDG_DATA_HOME:-$HOME/.local/share}/telegram-downloader/.venv"
+# Prefer the system venv (created by root/admin on first run); otherwise
+# use a per-user venv since regular users cannot write to /opt.
+if [ -x "$SYS_VENV/bin/python" ] || [ -w "$APP" ]; then
+  VENV="$SYS_VENV"
+else
+  VENV="$USER_VENV"
+fi
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
 "$VENV/bin/pip" install -q -U "$APP" "$APP[gui,speed]" || "$VENV/bin/pip" install -q -U "$APP"
 exec "$VENV/bin/tg-dl" "$@"
