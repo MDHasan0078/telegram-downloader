@@ -10,8 +10,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: builds only READ; only the single release job (that
+# touches the GitHub Release) elevates to contents: write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -31,30 +33,26 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$VERSION" || { echo "bad tag version '$VERSION'"; exit 1; }
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
-          grep -E "^version" pyproject.toml
+          grep -E "^version = \"$VERSION\"$" pyproject.toml
       - run: chmod +x scripts/build-deb.sh && ./scripts/build-deb.sh
       - name: Smoke test .deb contents
         run: |
           DEB=(dist/*.deb)
+          [ "${#DEB[@]}" -eq 1 ] || { echo "expected exactly 1 .deb, found ${#DEB[@]}"; exit 1; }
           dpkg-deb -f "$DEB" Package Version Architecture Depends
           dpkg-deb -c "$DEB" | grep -E "(usr/bin/tg-dl|opt/telegram-downloader)" | head -5
-      - uses: actions/upload-artifact@v4
-        with: { name: deb, path: dist/*.deb }
       - name: Checksums
         if: startsWith(github.ref, 'refs/tags/v')
         run: cd dist && sha256sum *.deb > SHA256SUMS-deb
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: "${{ github.ref_name }}"
-          generate_release_notes: true
-          files: |
+          name: deb
+          path: |
             dist/*.deb
             dist/SHA256SUMS-deb
-          overwrite: true
 
   apk:
     needs: test
@@ -65,9 +63,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$VERSION" || { echo "bad tag version '$VERSION'"; exit 1; }
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
-          grep -E "^version" pyproject.toml
+          grep -E "^version = \"$VERSION\"$" pyproject.toml
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - uses: actions/setup-java@v4
@@ -85,23 +84,18 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           ls -R build
           APK=(build/apk/*.apk)
+          [ "${#APK[@]}" -eq 1 ] || { echo "expected exactly 1 APK, found ${#APK[@]}"; exit 1; }
           mv "$APK" "build/apk/telegram-downloader_${VERSION}.apk"
           ls -la build/apk/
-      - uses: actions/upload-artifact@v4
-        with: { name: apk, path: build/apk/*.apk }
       - name: Checksums
         if: startsWith(github.ref, 'refs/tags/v')
         run: cd build/apk && sha256sum *.apk > SHA256SUMS-apk
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: "${{ github.ref_name }}"
-          generate_release_notes: true
-          files: |
+          name: apk
+          path: |
             build/apk/*.apk
             build/apk/SHA256SUMS-apk
-          overwrite: true
 
   dmg:
     needs: test
@@ -112,9 +106,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$VERSION" || { echo "bad tag version '$VERSION'"; exit 1; }
           sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i '' "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
-          grep -E "^version" pyproject.toml
+          grep -E "^version = \"$VERSION\"$" pyproject.toml
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: brew install create-dmg
@@ -130,18 +125,69 @@ jobs:
           create-dmg --volname "Telegram Downloader" \
             "dist/telegram-downloader_${VERSION}.dmg" "$APP"
           ls -la dist/
-      - uses: actions/upload-artifact@v4
-        with: { name: macos, path: dist/*.dmg }
       - name: Checksums
         if: startsWith(github.ref, 'refs/tags/v')
-        run: cd dist && sha256sum *.dmg > SHA256SUMS-dmg
+        # sha256sum is absent on stock macOS; use shasum (BSD coreutils).
+        # Its 2-space output is identical in format, so `sha256sum -c` on
+        # the Linux release job verifies these checksums.
+        run: cd dist && shasum -a 256 *.dmg > SHA256SUMS-dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.dmg
+            dist/SHA256SUMS-dmg
+
+  # Single release job: the three build jobs upload their artifacts + their
+  # own per-platform checksum files; this job verifies them and attaches
+  # everything to the tag in ONE step. Previously each job called
+  # softprops/action-gh-release concurrently, which raced on creating the
+  # release (422) and produced duplicate release notes.
+  release:
+    needs: [deb, apk, dmg]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: deb, path: deb }
+      - uses: actions/download-artifact@v4
+        with: { name: apk, path: apk }
+      - uses: actions/download-artifact@v4
+        with: { name: macos, path: macos }
+      - name: Verify checksums and filenames
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "release ${VERSION} contents:"
+          ls -la deb apk macos
+          # Exactly one of each installer + one checksum file per platform.
+          [ "$(ls deb/*.deb 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing deb"; exit 1; }
+          [ "$(ls apk/*.apk 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing apk"; exit 1; }
+          [ "$(ls macos/*.dmg 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing dmg"; exit 1; }
+          for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+            [ -f "$f" ] || { echo "missing checksum file $f"; exit 1; }
+          done
+          # Names must be the exact versioned release names the updater expects.
+          [ -f "deb/telegram-downloader_${VERSION}_amd64.deb" ] || { echo "unexpected deb filename"; ls -1 deb; exit 1; }
+          [ -f "apk/telegram-downloader_${VERSION}.apk" ] || { echo "unexpected apk filename"; ls -1 apk; exit 1; }
+          [ -f "macos/telegram-downloader_${VERSION}.dmg" ] || { echo "unexpected dmg filename"; ls -1 macos; exit 1; }
+          # Checksums were generated on each platform; `sha256sum -c`
+          # validates them here (macOS shasum -a 256 output is compatible).
+          ( cd deb && sha256sum -c SHA256SUMS-deb )
+          ( cd apk && sha256sum -c SHA256SUMS-apk )
+          ( cd macos && sha256sum -c SHA256SUMS-dmg )
       - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ github.ref_name }}"
           generate_release_notes: true
           files: |
-            dist/*.dmg
-            dist/SHA256SUMS-dmg
+            deb/*.deb
+            deb/SHA256SUMS-deb
+            apk/*.apk
+            apk/SHA256SUMS-apk
+            macos/*.dmg
+            macos/SHA256SUMS-dmg
           overwrite: true

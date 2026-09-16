@@ -16,6 +16,19 @@ if not m:
     sys.exit(1)
 print(m.group(1))
 ')"
+# Reject obviously-bad versions (empty / unparsable) with a loud build error.
+if ! printf '%s' "$VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "build-deb.sh: invalid version in pyproject.toml: '$VER'" >&2
+  exit 1
+fi
+# Verify the vendored wheel against its recorded manifest so a corrupted
+# wheels/ copy fails at build time, not mid-install for end users.
+if [ -f wheels/SHA256SUMS ]; then
+  ( cd wheels && sha256sum -c SHA256SUMS ) || {
+    echo "build-deb.sh: vendored wheel checksum mismatch in wheels/" >&2
+    exit 1
+  }
+fi
 PKG="dist/debroot"
 rm -rf dist "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/opt/telegram-downloader" "$PKG/usr/bin" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps"

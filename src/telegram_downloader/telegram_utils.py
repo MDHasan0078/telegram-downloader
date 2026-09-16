@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from .constants import MAX_URL_LEN, MAX_URL_LIST_BYTES, MAX_URLS
+from .constants import MAX_TITLE_LEN, MAX_URL_LEN, MAX_URL_LIST_BYTES, MAX_URLS
 
 ChatRef = Union[str, int]
 
@@ -18,10 +18,11 @@ def parse_message_url(url: str) -> Tuple[ChatRef, int, Optional[int]]:
     if len(url) > MAX_URL_LEN:
         raise ValueError("Telegram URL too long.")
     patterns = [
-        # t.me/c/<internal id>/<msg> or /<thread>/<msg>
-        (r"^https?://(?:t\.me|telegram\.me)/c/(\d{1,20})/(\d{1,10})(?:/(\d{1,10}))?(?:\?.*)?/?$", True),
+        # t.me/c/<internal id>/<msg> or /<thread>/<msg>  (id capped at 15
+        # digits so -100 prefix stays well inside signed 64-bit range)
+        (r"^https://(?:t\.me|telegram\.me)/c/(\d{1,15})/(\d{1,10})(?:/(\d{1,10}))?(?:\?.*)?/?$", True),
         # t.me/<username>/<msg> or /<thread>/<msg>
-        (r"^https?://(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,32})/(\d{1,10})(?:/(\d{1,10}))?(?:\?.*)?/?$", False),
+        (r"^https://(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,32})/(\d{1,10})(?:/(\d{1,10}))?(?:\?.*)?/?$", False),
     ]
     for pattern, is_internal in patterns:
         m = re.match(pattern, url)
@@ -56,12 +57,14 @@ def safe_filename(name: str) -> str:
     # Replace null bytes and control chars first — they can truncate strings
     # in C-based tools (ffmpeg, ffprobe, shell) and confuse argument parsing.
     name = re.sub(r"[\x00-\x1f\x7f]", "_", name)
-    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
+    # `$` and backticks are shell-special: a crafted title must not be able
+    # to smuggle command substitution into a later shell invocation.
+    name = re.sub(r"[\\/:*?\"<>|$`]", "_", name)
     name = name.strip().strip(".")
     # Collapse whitespace, cap length for filesystems.
     name = re.sub(r"\s+", " ", name).strip()
-    if len(name) > 140:
-        name = name[:140].rstrip()
+    if len(name) > MAX_TITLE_LEN:
+        name = name[:MAX_TITLE_LEN].rstrip()
     # Leading dash would make ffmpeg treat the filename as an option.
     if name.startswith("-"):
         name = "_" + name
@@ -70,7 +73,10 @@ def safe_filename(name: str) -> str:
 
 def format_bytes(value: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
-    n = float(value)
+    try:
+        n = max(0.0, float(value))
+    except (TypeError, ValueError):
+        n = 0.0
     for unit in units:
         if n < 1024 or unit == units[-1]:
             return f"{n:.1f} {unit}"
@@ -121,9 +127,15 @@ def auto_title_from_message(message, chat) -> str:
     title = candidates[0] if candidates else "telegram_video"
     title = re.sub(r"[\n\r\t]+", " ", title)
     title = re.sub(r"\s+", " ", title).strip()
-    if len(title) > 140:
-        title = title[:140].rstrip()
+    if len(title) > MAX_TITLE_LEN:
+        title = title[:MAX_TITLE_LEN].rstrip()
     return safe_filename(title)
+
+
+# A link must BE t.me / telegram.me (start-anchored), not merely contain
+# it. Bare forms ("t.me/chan/5") get https: normalized; a "foo.t.me" or
+# "evil.com/t.me/..." substring never matches.
+_TELEGRAM_LINK_RE = re.compile(r"^(?:https://)?(?:t\.me|telegram\.me)(?:/|$)")
 
 
 def split_urls(raw: str, limit: int = MAX_URLS) -> list[str]:
@@ -145,11 +157,16 @@ def split_urls(raw: str, limit: int = MAX_URLS) -> list[str]:
             continue
         if len(u) > MAX_URL_LEN:
             continue
-        # Accept anything looking like t.me; validation happens later so the
-        # UI can show per-row errors instead of silently dropping lines.
-        if "t.me" in u or "telegram.me" in u:
-            seen.add(u)
-            out.append(u)
-            if len(out) >= limit:
-                break
+        if not _TELEGRAM_LINK_RE.match(u):
+            continue
+        if not u.startswith("https://"):
+            u = "https://" + u
+        if u in seen:
+            continue
+        # Validation happens later so the UI shows per-row errors instead
+        # of silently dropping lines.
+        seen.add(u)
+        out.append(u)
+        if len(out) >= limit:
+            break
     return out

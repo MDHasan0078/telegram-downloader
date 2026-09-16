@@ -183,7 +183,9 @@ def _mkdir_parents_nofollow(target: Path, mode: int = 0o700) -> None:
             except OSError:
                 raise
         try:
-            p.chmod(mode)
+            # follow_symlinks=False: if a race planted a link, chmod refuses
+            # instead of chmodding an unrelated target through the link.
+            os.chmod(p, mode, follow_symlinks=False)
         except OSError:
             pass
 
@@ -337,14 +339,23 @@ def _read_legacy() -> dict:
             return values
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
+            # O_NOFOLLOW: never migrate secrets from a planted symlink.
             fd = os.open(LEGACY_CONFIG, os.O_RDONLY | nofollow)
+            try:
+                with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                    fd = -1
+                    raw_text = fh.read(512 * 1024)
+            finally:
+                if fd != -1:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
         except OSError as exc:
             import errno as _errno
             if exc.errno == _errno.ELOOP:
                 return values
             return values
-        with os.fdopen(fd, "r", encoding="utf-8") as fh:
-            raw_text = fh.read(512 * 1024)
         for raw in raw_text.splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -356,12 +367,32 @@ def _read_legacy() -> dict:
     return values
 
 
+def _read_json_nofollow(path: Path):
+    """JSON-load a file via O_NOFOLLOW|O_RDONLY (never through a symlink).
+
+    Returns the parsed object, or raises OSError on platform where
+    O_NOFOLLOW is unavailable with the target being a symlink (ELOOP).
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, os.O_RDONLY | nofollow)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            return json.load(fh)
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def load_settings() -> Settings:
     _ensure_dirs()
     data: dict = {}
     if CONFIG_JSON.exists():
         try:
-            data = json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
+            data = _read_json_nofollow(CONFIG_JSON)
         except (OSError, ValueError):
             data = {}
         if not isinstance(data, dict):
@@ -389,12 +420,21 @@ def load_settings() -> Settings:
                     LEGACY_CONFIG.unlink()
                 elif LEGACY_CONFIG.is_file():
                     try:
-                        size = LEGACY_CONFIG.stat().st_size
-                        with open(LEGACY_CONFIG, "r+b") as fh:
-                            fh.write(b"\x00" * min(size, 1 << 20))
-                            fh.flush()
+                        # Shred via O_NOFOLLOW fd: a link planted between
+                        # the is_file() check and the open must not let us
+                        # zero-fill some OTHER file (clobber vector).
+                        nofollow = getattr(os, "O_NOFOLLOW", 0)
+                        fd = os.open(LEGACY_CONFIG, os.O_RDWR | nofollow)
+                        try:
+                            st = os.fstat(fd)
+                            os.ftruncate(fd, 0)
+                            size = min(st.st_size, 1 << 20)
+                            os.lseek(fd, 0, os.SEEK_SET)
+                            os.write(fd, b"\x00" * size)
+                            os.fsync(fd)
+                        finally:
                             try:
-                                os.fsync(fh.fileno())
+                                os.close(fd)
                             except OSError:
                                 pass
                     except OSError:
@@ -402,7 +442,7 @@ def load_settings() -> Settings:
                     LEGACY_CONFIG.unlink()
             except OSError:
                 pass
-            data = json.loads(CONFIG_JSON.read_text(encoding="utf-8")) if CONFIG_JSON.exists() else data
+            data = _read_json_nofollow(CONFIG_JSON) if CONFIG_JSON.exists() else data
 
     s = Settings(
         api_id=str(data.get("api_id")) if data.get("api_id") else None,
@@ -446,38 +486,58 @@ def session_path_str() -> str:
     # Pre-create the sqlite file owner-only so Telethon never creates it
     # under a permissive umask (0644 window before harden_session_files).
     # An empty file is a valid empty sqlite DB for Telethon/sqlite3.
+    import errno as _errno
     session_file = Path(str(SESSION_BASE) + ".session")
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    try:
-        if session_file.is_symlink():
-            # Planted link: remove the link itself (never the target) so
-            # the next open cannot write the auth key to an attacker file.
-            session_file.unlink()
-    except OSError:
-        pass
-    try:
-        if not session_file.exists():
-            with umask_077():
-                # O_NOFOLLOW: refuse to create through a link planted in the
-                # check-then-open window (ELOOP -> unlink plant, retry once).
+    # 3 attempts: ELOOP => unlink the plant and retry; anything else fails
+    # loudly. NEVER silently return a path that still resolves to attacker
+    # content (Telethon would write the auth key into it).
+    made = False
+    for _ in range(3):
+        try:
+            if session_file.is_symlink():
+                # Planted link: remove the link itself (never the target).
+                session_file.unlink()
+        except OSError:
+            # is_symlink/unlink raced: re-open with O_NOFOLLOW below decides.
+            pass
+        try:
+            if session_file.exists():
+                with umask_077():
+                    dfd = os.open(session_file, os.O_RDONLY | nofollow)
                 try:
-                    fd = os.open(session_file,
-                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
-                    os.close(fd)
-                except OSError as exc:
-                    import errno
-                    if exc.errno == errno.ELOOP and nofollow:
-                        try:
-                            session_file.unlink()
-                        except OSError:
-                            pass
-                        fd = os.open(session_file,
-                                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
-                        os.close(fd)
-                    elif exc.errno not in (errno.EEXIST, errno.ELOOP):
-                        raise
-    except (FileExistsError, OSError):
-        pass
+                    os.fstat(dfd)  # reaches here only if not a symlink
+                finally:
+                    try:
+                        os.close(dfd)
+                    except OSError:
+                        pass
+                harden_private_file(session_file)
+                return str(SESSION_BASE)
+        except OSError as exc:
+            if exc.errno in (_errno.ELOOP,) and nofollow:
+                continue
+            raise
+        try:
+            with umask_077():
+                # O_NOFOLLOW|O_EXCL: refuse to create through a link planted
+                # in the check-then-open window. ELOOP -> unlink plant, retry.
+                fd = os.open(session_file,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+                os.close(fd)
+                made = True
+                break
+        except OSError as exc:
+            if exc.errno == _errno.ELOOP and nofollow:
+                continue
+            if exc.errno == _errno.EEXIST:
+                continue  # raced to create; loop verifies with O_NOFOLLOW
+            raise
+    if not made:
+        # Only reachable after ELOOP-without-nofollow support, or with a host
+        # that keeps racing a symlink in under us: fail closed, never pass a
+        # planted link to Telethon.
+        raise OSError(f"could not safely create session file: {session_file}")
     harden_private_file(session_file)
     return str(SESSION_BASE)
 
@@ -495,7 +555,10 @@ def ensure_download_dir(s: Settings) -> Path:
     target = Path(raw).expanduser() if raw else default_download_dir()
     _refuse_config_symlink()
     # Reject world-writable download parents (squat in /tmp 1777).
-    # Also reject download dirs with shell meta chars (explorer injection).
+    # Also reject control chars (telemetry/terminal-escape / filename
+    # injection) plus shell meta chars (explorer injection).
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in str(target)):
+        raise ValueError(f"Refusing download folder with control characters: {target}")
     if any(c in str(target) for c in [",", ";", "|", "&", "$", "`"]):
         raise ValueError(f"Refusing download folder with shell meta chars: {target}")
     # Containment: never allow the download tree to overlap the config dir
@@ -546,12 +609,14 @@ def ensure_download_dir(s: Settings) -> Path:
                     st = parent.stat()
                 except OSError:
                     continue
+                if parent == Path("/tmp") or str(parent) == "/tmp":
+                    # /tmp is a deliberate shared scratch dir (1777 sticky):
+                    # allow it, but the submkdir below is owner-0700 anyway.
+                    break
                 if st.st_mode & 0o002:
                     # sticky bit (1777) still allows squat; require owner
                     if parent.stat().st_uid != os.getuid():
                         raise ValueError(f"Refusing download folder under world-writable dir not owned by you: {parent}")
-                    break
-                if parent == Path("/tmp") or str(parent) == "/tmp":
                     break
         except ValueError:
             raise

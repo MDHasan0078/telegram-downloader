@@ -127,3 +127,71 @@ def test_verify_file_sha256(tmp_path):
         pass
     else:
         raise AssertionError("expected ValueError on mismatch")
+
+
+def test_verify_file_sha256_refuses_symlink(tmp_path):
+    # O_NOFOLLOW: a symlink planted where the installer should be must fail
+    # closed (ELOOP), never read the target's bytes and "verify" them.
+    import hashlib
+    real = tmp_path / "real.bin"
+    real.write_bytes(b"digest-target")
+    link = tmp_path / "f.bin"
+    link.symlink_to(real)
+    good = hashlib.sha256(b"digest-target").hexdigest()
+    try:
+        upd._verify_file_sha256(link, good)
+    except OSError:
+        # Linux: ELOOP. (Non-Linux platforms without O_NOFOLLOW would pass
+        # the bytes through, which is why the caller also re-checks names.)
+        pass
+    else:
+        raise AssertionError("expected OSError for symlinked file")
+
+
+def test_https_url_ok():
+    assert upd._https_url_ok("https://github.com/x/y", upd.RELEASE_HOSTS)
+    assert upd._https_url_ok("https://release-assets.githubusercontent.com/z", upd.ASSET_HOSTS)
+    assert not upd._https_url_ok("http://github.com/x/y", upd.RELEASE_HOSTS)      # downgrade
+    assert not upd._https_url_ok("https://evil.com/x/y", upd.RELEASE_HOSTS)       # foreign host
+    assert not upd._https_url_ok("https://github.com@evil.com/x", upd.RELEASE_HOSTS)  # userinfo
+    assert not upd._https_url_ok("https://github.com:8080/x", upd.RELEASE_HOSTS)  # port
+    assert not upd._https_url_ok("https://github.com.attacker.io/x", upd.RELEASE_HOSTS)  # suffix trick
+
+
+def test_no_redirect_allowlist():
+    h = upd._NoRedirect(upd.ASSET_HOSTS)
+    req = upd.urllib.request.Request("https://github.com/a/b")
+    ok = h.redirect_request(req, None, 302, "Found", {}, "https://release-assets.githubusercontent.com/c")
+    assert ok is not None and ok.full_url.startswith("https://release-assets")
+    # Evils must all be refused (None == don't follow).
+    for evil in ("http://github.com/x",
+                 "https://evil.com/x",
+                 "https://release-assets.githubusercontent.com@evil.com/x",
+                 "https://release-assets.githubusercontent.com:8443/x",
+                 "ftp://github.com/x"):
+        assert h.redirect_request(req, None, 302, "Found", {}, evil) is None, evil
+
+
+def test_no_redirect_auth_handling():
+    h = upd._NoRedirect(upd.ASSET_HOSTS)
+    req = upd.urllib.request.Request("https://github.com/a/b", headers={"Authorization": "Bearer tok"})
+    # Same host: token kept.
+    same = h.redirect_request(req, None, 302, "Found", {}, "https://github.com/other")
+    assert same is not None and same.headers.get("Authorization") == "Bearer tok"
+    # Cross host (github.com -> assets CDN): token MUST be dropped.
+    cross = h.redirect_request(req, None, 302, "Found", {}, "https://release-assets.githubusercontent.com/other")
+    assert cross is not None and "Authorization" not in cross.headers
+
+
+def test_ascii_digit_only_regexes():
+    # Unicode \d would let Arabic-Indic digit "versions" match; the agents
+    # flagged this as an allowlist bypass vector. [0-9] blocks it.
+    assert upd._VERSION_RE.fullmatch("1.2.3")
+    assert upd._VERSION_RE.fullmatch("v1.2.3")
+    assert not upd._VERSION_RE.fullmatch("١.٢.٣")
+    assert upd._ASSET_NAME_RE.match("telegram-downloader_1.2.3_amd64.deb")
+    assert not upd._ASSET_NAME_RE.match("telegram-downloader_١.٢.٣.deb")
+    assert not upd._ASSET_NAME_RE.match("telegram-downloader_1.2.3.exe")  # no Windows build
+    url = "https://github.com/MDHasan0078/telegram-downloader/releases/tag/v1.2.3"
+    assert upd._RELEASE_URL_RE.match(url)
+    assert not upd._RELEASE_URL_RE.match(url.replace("1", "١"))

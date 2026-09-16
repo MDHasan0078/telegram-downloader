@@ -27,6 +27,34 @@ def _bin(name: str) -> Optional[str]:
         return None
 
 
+def _reap(proc: subprocess.Popen) -> None:
+    """Reap a dead child so no zombie / orphan ffmpeg is left behind.
+
+    SIGTERM first (lets ffmpeg flush), then SIGKILL, waiting up to ~35 s
+    total. proc.wait() can itself TimeoutExpired; never give up early and
+    leak a zombie.
+    """
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for _ in range(30):
+        try:
+            proc.wait(timeout=1)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def has_ffmpeg() -> bool:
     return _bin("ffmpeg") is not None
 
@@ -95,9 +123,7 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
     the event kills the process (child-friendly SIGTERM, then SIGKILL) and
     raises RuntimeError("...cancelled...").
     """
-    if not has_ffmpeg():
-        raise RuntimeError("ffmpeg is required for MP4 output but was not found.")
-    exe = _bin("ffmpeg")
+    exe = _bin("ffmpeg")  # single resolve: same path checked and exec'd
     if not exe:
         raise RuntimeError("ffmpeg is required for MP4 output but was not found.")
     # Refuse to let ffmpeg -y truncate through a planted symlink/pipe.
@@ -124,12 +150,9 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
             proc = subprocess.Popen(cmd)
             while proc.poll() is None:
                 if cancel.is_set():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait(timeout=5)
+                    # _reap terminates, then kills; never leaks a zombie or
+                    # an orphaned ffmpeg that keeps holding the part file.
+                    _reap(proc)
                     try:
                         output_path.unlink(missing_ok=True)
                     except OSError:

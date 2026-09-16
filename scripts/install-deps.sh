@@ -24,7 +24,7 @@ elif have dnf; then
 elif have pacman; then
   sudo pacman -Sy --noconfirm python ffmpeg
 else
-  echo "Unknown OS — install Python 3.9+ and ffmpeg manually."
+  echo "Unknown OS — install Python 3.10+ and ffmpeg manually."
 fi
 
 EXTRAS=""

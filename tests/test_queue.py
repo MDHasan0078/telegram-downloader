@@ -130,3 +130,66 @@ def test_midflight_statuses_back_to_queued(tmp_path):
     store = QueueStore(path=p)
     assert store.items[0].status == "queued"
     assert store.items[1].status == "done"
+
+
+def test_method_shadow_ignored_on_load_and_save(tmp_path):
+    # A crafted file with {"to_dict": "boom"} used to shadow the dataclass
+    # method and crash the next save() with "str not callable".
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps([
+        {"url": "http://x", "title": "real", "to_dict": "boom", "from_dict": "boom"},
+    ]))
+    store = QueueStore(path=p)
+    assert len(store.items) == 1
+    assert store.items[0].title == "real"
+    store.save()  # must not raise
+    data = json.loads(p.read_text())
+    assert data[0]["url"] == "http://x"
+    assert "to_dict" not in data[0]
+    # update() with a method name as key must be a no-op too.
+    store.update(store.items[0].id, to_dict="boom", title="t2")
+    assert store.items[0].title == "t2"
+    store.save()
+
+
+def test_update_rejects_empty_or_nonstring_id(tmp_path):
+    store = QueueStore(path=tmp_path / "q.json")
+    it = DownloadItem(url="http://x")
+    store.add(it)
+    before = it.id
+    store.update(it.id, id="")
+    assert it.id == before  # empty id must not be applied
+    store.update(it.id, id=12345)
+    assert it.id == before  # non-string id must not be applied
+
+
+def test_ext_to_nonstring_coerced_to_mp4(tmp_path):
+    # A crafted int/float ext must not crash re.fullmatch on load.
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps([{"url": "http://x", "title": "t", "ext": 123}]))
+    store = QueueStore(path=p)
+    assert store.items[0].ext == ".mp4"
+    it = DownloadItem.from_dict({"url": "http://x", "ext": 12.5})
+    assert it.ext == ".mp4"
+
+
+def test_added_at_nonfinite_and_negative_clamped(tmp_path):
+    it = DownloadItem.from_dict({"url": "http://x", "added_at": float("nan")})
+    assert it.added_at == 0.0
+    it2 = DownloadItem.from_dict({"url": "http://x", "added_at": -50.0})
+    assert it2.added_at == 0.0
+    # Non-numeric added_at from a corrupt file also lands at 0.
+    p = tmp_path / "q.json"
+    p.write_text(json.dumps([{"url": "http://x", "title": "t", "added_at": "abc"}]))
+    store = QueueStore(path=p)
+    assert store.items[0].added_at == 0.0
+
+
+def test_load_nonfinite_number_backs_up(tmp_path):
+    # JSON NaN/Infinity must be rejected at parse time (parse_constant),
+    # not persisted as floats that poison comparisons/formatting.
+    p = tmp_path / "q.json"
+    p.write_text('[{"url": "http://x", "title": "t", "added_at": NaN}]')
+    store = QueueStore(path=p)
+    assert store.items == []
+    assert list(tmp_path.glob("q.json.corrupt-*.bak"))

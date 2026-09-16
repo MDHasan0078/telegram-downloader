@@ -44,6 +44,7 @@ def run_gui(port=None):
         "previews": [],   # list[dict]: url,title,ext,size,ok,error,selected
         "fetching": False,
         "downloading": False,
+        "queuing": False,
         "client": None,
         "cancel": None,   # asyncio.Event for current batch
         "mode": settings.output_mode or "1",
@@ -292,6 +293,7 @@ def run_gui(port=None):
                       ft.Segment(value="3", label=ft.Text("Max"),
                                  icon=ft.Icons.HD)],
             selected=[state["mode"] if state["mode"] in MODE_LABELS else "1"])
+        state["mode_seg"] = mode_seg
 
         def _on_mode(e):
             sel = e.control.selected
@@ -413,23 +415,41 @@ def run_gui(port=None):
             render_previews()
 
         async def on_download(e):
+            if state["queuing"]:
+                return  # double-click / repeat click must not double-queue
             sel = [r for r in state["previews"] if r["ok"] and r["selected"]]
             if not sel:
                 snack(page, "Nothing selected.", error=True)
                 return
             st = load_settings()
-            out_dir = ensure_download_dir(st)
+            try:
+                out_dir = ensure_download_dir(st)
+            except (OSError, ValueError) as exc:
+                snack(page, _sanitize_display(f"Cannot use download folder: {exc}"), error=True)
+                return
             confirmed = await confirm_dialog(
                 page, f"Download {len(sel)} file(s) to:\n{out_dir}?",
                 "\n".join(f"• {safe_filename(r['title'])}{r['ext']}" for r in sel[:8])
                 + (f"\n… +{len(sel) - 8} more" if len(sel) > 8 else ""))
             if not confirmed:
                 return
-            for r in sel:
-                store.add(DownloadItem(url=r["url"], title=safe_filename(r["title"]),
-                                       ext=r["ext"], size=r["size"], status="queued",
-                                       mode=r.get("mode") or state.get("mode") or st.output_mode or "1"))
-            snack(page, f"Queued {len(sel)} file(s) — see Queue tab.")
+            state["queuing"] = True
+            dl_btn.disabled = True
+            page.update()
+            try:
+                items = [DownloadItem(url=r["url"], title=safe_filename(r["title"]),
+                                      ext=r["ext"], size=r["size"], status="queued",
+                                      mode=r.get("mode") or state.get("mode") or st.output_mode or "1")
+                         for r in sel]
+                added = store.extend(items)
+                if len(added) < len(items):
+                    snack(page,
+                          f"Queue near full: added {len(added)} of {len(items)} file(s).",
+                          error=True)
+                else:
+                    snack(page, f"Queued {len(added)} file(s) — see Queue tab.")
+            finally:
+                state["queuing"] = False
             if "goto" in nav:
                 nav["goto"](1)
             await start_queue(page)
@@ -488,6 +508,14 @@ def run_gui(port=None):
                 page.update()
             except Exception as exc:
                 snack(page, f"Cannot read file: {exc}", error=True)
+            finally:
+                # Flet picker instances stay registered on the overlay if left
+                # behind; remove it so repeated picks don't grow the overlay.
+                try:
+                    page.overlay.remove(fp)
+                    page.update()
+                except Exception:
+                    pass
 
         def on_clear(e):
             url_box.value = ""
@@ -622,8 +650,35 @@ def run_gui(port=None):
                     from .telegram_utils import infer_extension
                     chat, mid, _ = parse_message_url(item.url)
                     try:
-                        msg = await asyncio.wait_for(
-                            c.get_messages(chat, ids=mid), timeout=120)
+                        # Race the metadata fetch against Cancel: without this a
+                        # stuck get_messages holds the item "downloading" for up
+                        # to 120 s with no way to stop it.
+                        _mget = asyncio.ensure_future(c.get_messages(chat, ids=mid))
+                        _cwait = asyncio.ensure_future(state["cancel"].wait())
+                        done, _pending = await asyncio.wait(
+                            {_mget, _cwait}, return_when=asyncio.FIRST_COMPLETED,
+                            timeout=120)
+
+                        async def _cancel_pending():
+                            for t in (_mget, _cwait):
+                                if not t.done():
+                                    t.cancel()
+                            await asyncio.gather(*_pending, return_exceptions=True)
+
+                        if state["cancel"].is_set():
+                            await _cancel_pending()
+                            raise Cancelled(
+                                "Cancelled while waiting for message metadata.")
+                        if _mget in done:
+                            msg = _mget.result()
+                            if not _cwait.done():
+                                _cwait.cancel()
+                            await asyncio.gather(_cwait, return_exceptions=True)
+                        else:
+                            await _cancel_pending()
+                            raise RuntimeError(
+                                "Telegram did not answer within 2 min — service down "
+                                "or API floodwaited. Try again shortly.")
                     except asyncio.TimeoutError as exc:
                         raise RuntimeError(
                             "Telegram did not answer within 2 min — service down "
@@ -678,13 +733,21 @@ def run_gui(port=None):
                         async def _watch_cancel():
                             await state["cancel"].wait()
                             t_cancel.set()
+
+                        async def _deadline(seconds: int = 3600):
+                            # A hung ffmpeg must not hold the item
+                            # "converting" forever: hard-stop after an hour.
+                            await asyncio.sleep(seconds)
+                            t_cancel.set()
                         watch = asyncio.create_task(_watch_cancel())
+                        clock = asyncio.create_task(_deadline())
                         try:
                             await asyncio.to_thread(
                                 converter.ffmpeg_to_mp4, source, tmp, mode,
                                 cancel=t_cancel)
                         finally:
                             watch.cancel()
+                            clock.cancel()
                         if state["cancel"].is_set():
                             try:
                                 tmp.unlink(missing_ok=True)
@@ -780,7 +843,7 @@ def run_gui(port=None):
                                                  store.update(_id, status="queued", error=""),
                                                  start_soon(page))))
             if it.status in ("downloading", "converting", "fetching"):
-                actions.append(ft.IconButton(ft.Icons.STOP, tooltip="Cancel this download",
+                actions.append(ft.IconButton(ft.Icons.STOP, tooltip="Stop current download\n(rest stay queued)",
                                              icon_color=ft.Colors.ERROR,
                                              on_click=lambda e, _id=it.id: cancel_id(
                                                  page, _id)))
@@ -846,9 +909,12 @@ def run_gui(port=None):
             snack(page, "Removed queued download.")
             return
         if it.status in ("downloading", "converting", "fetching"):
+            # Only one batch can run at a time, so stopping the active item
+            # naturally pauses the run. Be honest about it: the current file
+            # is cancelled and the rest remain queued for "Resume all / Start".
             if state.get("cancel") and not state["cancel"].is_set():
                 state["cancel"].set()
-                snack(page, "Cancelling after this chunk — partial file kept for resume.")
+                snack(page, "Stopping this download — others stay queued (Resume all to continue).")
             else:
                 snack(page, "Already stopping…", error=True)
 
@@ -870,7 +936,7 @@ def run_gui(port=None):
         def on_cancel(e):
             if state.get("cancel"):
                 state["cancel"].set()
-                snack(page, "Cancelling after current chunk... (partial kept for resume)")
+                snack(page, "Stopping queue — current file is cancelled, the rest stay queued.")
 
         toolbar = ft.Card(ft.Container(ft.Column([
             ft.Row([header, ft.Container(expand=True),
@@ -980,7 +1046,8 @@ def run_gui(port=None):
                 c = await get_client(page)
                 if await c.is_user_authorized():
                     me = await c.get_me()
-                    snack(page, f"Already logged in as {getattr(me, 'first_name', None) or getattr(me, 'username', None)}.")
+                    name = getattr(me, 'first_name', None) or getattr(me, 'username', None)
+                    snack(page, f"Already logged in as {_sanitize_display(str(name))}.")
                     return
                 ok = await gui_login(page, c)
                 snack(page, "Login OK." if ok else "Login cancelled.")
@@ -1112,11 +1179,14 @@ def run_gui(port=None):
         async def on_reset(e):
             # Destructive two-step: reset options, clear the saved session and
             # the pending download queue. A stray click must not nuke secrets.
+            # The confirm button is labelled for what it actually does (Reset),
+            # not the downloads dialog's default "Download".
             cp = await confirm_dialog(
                 page,
                 "Reset everything?",
                 "This clears your saved credentials, logs out the Telegram "
-                "session, and empties the download queue. This cannot be undone.")
+                "session, and empties the download queue. This cannot be undone.",
+                action="Reset everything", icon=ft.Icons.WARNING_AMBER)
             if not cp:
                 return
             if state.get("cancel") and not state.get("cancel").is_set():
@@ -1132,6 +1202,12 @@ def run_gui(port=None):
             try:
                 settings_refs["mode_txt"].value = "Original"
                 settings_refs["folder_txt"].value = str(default_download_dir())
+            except Exception:
+                pass
+            try:
+                mg = state.get("mode_seg")
+                if mg is not None:
+                    mg.selected = ["1"]
             except Exception:
                 pass
             refresh_queue()
@@ -1198,13 +1274,18 @@ def run_gui(port=None):
         sys_txt = ft.Text(f"{platform.system()} {platform.release()} • Python {platform.python_version()}",
                           size=12, color=ft.Colors.ON_SURFACE_VARIANT)
 
-        def render():
+        def render(rows_data=None):
             col.controls.clear()
             col.controls.append(h1(ft.Icons.BUILD, "Dependencies",
                                    "Engine status for download + convert."))
             col.controls.append(sys_txt)
+            if rows_data is None:
+                # First build happens before the view is shown, so the sync
+                # subprocess probes here are acceptable. Repeated checks go
+                # through _recheck (thread) to keep the UI responsive.
+                rows_data = deps_mod.check_all()
             rows: list = []
-            for d in deps_mod.check_all():
+            for d in rows_data:
                 rows.append(ft.Row([
                     ft.Icon(ft.Icons.CHECK_CIRCLE if d.ok else ft.Icons.ERROR, size=20,
                             color=ft.Colors.GREEN if d.ok else ft.Colors.ERROR),
@@ -1226,8 +1307,25 @@ def run_gui(port=None):
                         ], spacing=8),
                         bgcolor=ft.Colors.ERROR_CONTAINER,
                         border_radius=8, padding=12))
+            async def _recheck(e):
+                # check_all spawns subprocesses (ffprobe -version, etc.):
+                # offload to a thread so repeated checks never freeze the UI.
+                btn = e.control
+                btn.disabled = True
+                btn.text = "Checking…"
+                page.update()
+                try:
+                    data = await asyncio.to_thread(deps_mod.check_all)
+                    render(data)
+                except Exception as exc:
+                    snack(page, f"Dependency check failed: {exc}", error=True)
+                finally:
+                    btn.disabled = False
+                    btn.text = "Re-check"
+                    page.update()
+
             rows.append(ft.Row([ft.FilledTonalButton("Re-check", icon=ft.Icons.REFRESH,
-                                                     on_click=lambda e: render())],
+                                                     on_click=_recheck)],
                                alignment=ft.MainAxisAlignment.START))
             col.controls.append(section("Status", rows, icon=ft.Icons.CHECKLIST,
                                         subtitle="Required tools for download + convert."))
@@ -1455,12 +1553,14 @@ def run_gui(port=None):
             except NameError:
                 pass
 
-    async def confirm_dialog(page, title: str, body: str) -> bool:
+    async def confirm_dialog(page, title: str, body: str,
+                             action: str = "Download",
+                             icon=ft.Icons.DOWNLOAD) -> bool:
         import flet as ft
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         dlg = ft.AlertDialog(title=ft.Text(title), content=ft.Text(body),
-                             icon=ft.Icon(ft.Icons.DOWNLOAD),
-                             actions=[ft.TextButton("Cancel"), ft.FilledButton("Download")])
+                             icon=ft.Icon(icon),
+                             actions=[ft.TextButton("Cancel"), ft.FilledButton(action)])
         dlg.actions[0].on_click = lambda e: (fut.set_result(False) if not fut.done() else None, _hide_dlg(page, dlg))
         dlg.actions[1].on_click = lambda e: (fut.set_result(True) if not fut.done() else None, _hide_dlg(page, dlg))
         _show_dlg(page, dlg)

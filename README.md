@@ -11,8 +11,8 @@
 <p align="center">
   <a href="https://github.com/MDHasan0078/telegram-downloader/releases"><img src="https://img.shields.io/github/v/release/MDHasan0078/telegram-downloader" alt="Latest release"></a>
   <a href="https://github.com/MDHasan0078/telegram-downloader/actions"><img src="https://img.shields.io/github/actions/workflow/status/MDHasan0078/telegram-downloader/build.yml" alt="Build status"></a>
-  <img src="https://img.shields.io/badge/python-%3E%3D3.9-blue" alt="Python 3.9+">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
+  <img src="https://img.shields.io/python-%3E%3D3.10-blue" alt="Python 3.10+">
+  <img src="https://img.shields.io/python-%3E%3D3.10/license-MIT-green" alt="MIT license">
 </p>
 
 ---

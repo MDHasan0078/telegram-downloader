@@ -7,9 +7,15 @@ from __future__ import annotations
 
 import importlib.util
 import platform
-import shutil
+import re
 import sys
 from dataclasses import dataclass
+
+
+def _strip_ansi(s: str) -> str:
+    # A hostile/corrupt ffmpeg could echo ANSI escapes in its version line;
+    # the dep status is rendered in GUI/CLI, keep it display-safe.
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f]", "", s).strip()
 
 
 @dataclass
@@ -45,10 +51,10 @@ def check_all() -> list[DepStatus]:
 
     # Python
     results.append(DepStatus(
-        name="Python 3.9+",
-        ok=sys.version_info >= (3, 9),
+        name="Python 3.10+",
+        ok=sys.version_info >= (3, 10),
         version=platform.python_version(),
-        hint="Upgrade Python to 3.9 or newer.",
+        hint="Upgrade Python to 3.10 or newer.",
         install_linux="sudo apt install python3 python3-venv  # Debian/Ubuntu",
         install_macos="brew install python@3.12",
         install_windows="winget install Python.Python.3.12",
@@ -56,16 +62,17 @@ def check_all() -> list[DepStatus]:
     ))
 
     # ffmpeg (only needed for modes 2/3; mode 1 works without it)
-    ff_exe = shutil.which("ffmpeg")
-    ff_ok = ff_exe is not None
-    ff_ver = ""
-    if ff_ok:
-        try:
-            import subprocess
-            r = subprocess.run([ff_exe, "-version"], capture_output=True, text=True, timeout=10)
-            ff_ver = (r.stdout.splitlines() or [""])[0].replace("ffmpeg version", "").strip()[:40]
-        except Exception:
-            pass
+    # Reuse converter's single _bin() resolution (avoids a TOCTOU double
+    # resolve) and require REAL output: a present-but-broken binary
+    # (non-zero exit) is reported as missing so the user fixes it instead of
+    # the app silently treating an empty version as OK.
+    from .converter import has_ffmpeg as _has_ffmpeg, ffmpeg_version as _ffmpeg_version
+    raw_ver = _ffmpeg_version()
+    ff_ok = _has_ffmpeg() and bool(raw_ver)
+    if raw_ver:
+        ff_ver = _strip_ansi(raw_ver)[:40]
+    else:
+        ff_ver = ""
     results.append(DepStatus(
         name="ffmpeg (for MP4 modes 2/3)",
         ok=ff_ok,

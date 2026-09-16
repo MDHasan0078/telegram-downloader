@@ -40,6 +40,28 @@ def _mask_id(value: str) -> str:
     return "***" if str(value or "") else "(not set)"
 
 
+def _run(coro) -> int:
+    """Run a coroutine with clean (no raw traceback) exit semantics.
+
+    KeyboardInterrupt/CancelledError are signals (BaseException) — print a
+    short line instead of a stack. Any login/download failure is surfaced
+    through _die with display-sanitized text so terminal-escape bytes in a
+    path never reach the console unescaped.
+    """
+    try:
+        return asyncio.run(coro)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+    except SystemExit:
+        raise
+    except asyncio.CancelledError:
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        _die(_sanitize_display(str(exc)))
+
+
 def _redact_home(path: str) -> str:
     try:
         home = str(Path.home())
@@ -376,7 +398,7 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
             return 1
         if not yes:
             try:
-                ans = input(f"\nDownload {len(ok)} file(s) to {out_dir}? [Y/n]: ").strip().lower()
+                ans = input(f"\nDownload {len(ok)} file(s) to {_sanitize_display(str(out_dir))}? [Y/n]: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print()
                 print("Cancelled.")
@@ -384,18 +406,27 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
             if ans in ("n", "no", "q"):
                 print("Cancelled.")
                 return 0
-        # Persist to queue (resume-all support) then download sequentially.
+        # Persist to queue (Resume-all support in the GUI). The CLI itself
+        # has no resume command, so dedupe against what's already queued so
+        # a rerun doesn't silently append duplicate rows.
         store = QueueStore()
+        existing = {i.url for i in store.items}
+        fresh = [p for p in ok if p.url not in existing]
+        if existing and fresh:
+            print(f"Skipping {len(ok) - len(fresh)} URL(s) already in the queue.")
         added = store.extend([DownloadItem(url=p.url, title=p.title,
                                            ext=p.ext, size=p.size,
-                                           mode=mode, status="queued") for p in ok])
+                                           mode=mode, status="queued") for p in fresh])
+        if not added:
+            print("All URLs are already queued — nothing new to download.")
+            return 0
         fails = 0
         for item in added:
             try:
                 store.update(item.id, status="downloading")
                 final = await _download_one(client, item.url, out_dir, item.mode, item.title)
                 store.update(item.id, status="done", progress=100.0, dest=str(final))
-                print(f"\nSaved: {final}")
+                print(f"\nSaved: {_sanitize_display(str(final))}")
             except Cancelled as exc:
                 store.update(item.id, status="cancelled",
                              error=_sanitize_display(str(exc)))
@@ -405,7 +436,8 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
                 store.update(item.id, status="error",
                              error=_sanitize_display(str(exc)))
                 print(f"\nFailed {_sanitize_display(item.url)}: {_sanitize_display(exc)}")
-        print(f"\nDone: {len(added)-fails} ok, {fails} failed. Queue saved; rerun to resume.")
+        print(f"\nDone: {len(added)-fails} ok, {fails} failed. "
+              "Queue saved — use the GUI's Resume all to retry later.")
         return 1 if fails else 0
     finally:
         await client.disconnect()
@@ -634,11 +666,15 @@ def main(argv=None) -> int:
                   "Or use CLI:  tg-dl download <url>  |  tg-dl deps", file=sys.stderr)
             return 1
     if args.cmd == "preview":
-        urls = split_urls(" ".join(args.urls)) or args.urls
-        return asyncio.run(cmd_preview(urls))
+        urls = split_urls(" ".join(args.urls))
+        if not urls:
+            _die("No valid t.me/telegram.me URLs given.")
+        return _run(cmd_preview(urls))
     if args.cmd == "download":
-        urls = split_urls(" ".join(args.urls)) or args.urls
-        return asyncio.run(cmd_download(urls, args.mode, args.yes, args.dir))
+        urls = split_urls(" ".join(args.urls))
+        if not urls:
+            _die("No valid t.me/telegram.me URLs given.")
+        return _run(cmd_download(urls, args.mode, args.yes, args.dir))
     if args.cmd == "batch":
         import os as _os
         import stat as _stat
@@ -654,7 +690,7 @@ def main(argv=None) -> int:
                 import errno as _errno
                 if exc.errno == _errno.ELOOP:
                     _die("Batch file must be a regular file (symlink refused).")
-                _die(f"Cannot read batch file: {exc}")
+                _die(f"Cannot read batch file: {_sanitize_display(str(exc))}")
             try:
                 st = _os.fstat(fd)
                 if not _stat.S_ISREG(st.st_mode):
@@ -673,12 +709,12 @@ def main(argv=None) -> int:
         except SystemExit:
             raise
         except (OSError, ValueError) as exc:
-            _die(f"Cannot read batch file: {exc}")
+            _die(f"Cannot read batch file: {_sanitize_display(str(exc))}")
         urls = split_urls(raw)
         if not urls:
-            _die("No t.me URLs found in batch file.")
-        print(f"Loaded {len(urls)} URL(s) from {args.file}")
-        return asyncio.run(cmd_download(urls, args.mode, args.yes, args.dir))
+            _die("No valid t.me/telegram.me URLs found in batch file.")
+        print(f"Loaded {len(urls)} URL(s) from {_sanitize_display(str(args.file))}")
+        return _run(cmd_download(urls, args.mode, args.yes, args.dir))
     if args.cmd == "config":
         return cmd_config(args)
     if args.cmd == "deps":

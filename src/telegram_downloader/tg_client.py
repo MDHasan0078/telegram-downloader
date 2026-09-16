@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 from telethon import TelegramClient, errors
 
+from . import __version__
 from .config import session_path_str
 from .telegram_utils import auto_title_from_message, infer_extension, parse_message_url
 
@@ -25,30 +26,30 @@ class Preview:
 
 
 def build_client(api_id: int, api_hash: str) -> TelegramClient:
-    from .config import session_path_str, umask_077
-    # umask 077: Telethon sqlite files are created owner-only from the
-    # start, closing the 0644-until-harden window.
+    from .config import umask_077
+    # Build inside umask 077: Telethon touches (creates) the sqlite session
+    # during TelegramClient construction under process-global umask, so the
+    # whole block must run with private perms — the session file is then
+    # owner-only from the start, closing the 0644-until-harden window. Also
+    # resolve the session path exactly once (no double call whose return is
+    # thrown away).
     with umask_077():
-        session_path_str()
-    return TelegramClient(
-        session_path_str(),
-        api_id,
-        api_hash,
-        timeout=20,
-        request_retries=8,
-        connection_retries=8,
-        retry_delay=2,
-        auto_reconnect=True,
-        flood_sleep_threshold=60,
-        raise_last_call_error=True,
-        device_model="Telegram Downloader",
-        app_version="0.1.0",
-    )
-
-
-async def ensure_connected(client: TelegramClient) -> None:
-    if not client.is_connected():
-        await client.connect()
+        session = session_path_str()
+        client = TelegramClient(
+            session,
+            api_id,
+            api_hash,
+            timeout=20,
+            request_retries=8,
+            connection_retries=8,
+            retry_delay=2,
+            auto_reconnect=True,
+            flood_sleep_threshold=60,
+            raise_last_call_error=True,
+            device_model="Telegram Downloader",
+            app_version=__version__,
+        )
+    return client
 
 
 def looks_like_phone(value: str) -> bool:
@@ -106,45 +107,7 @@ async def fetch_preview(client: TelegramClient, url: str) -> Preview:
                        title="", ext="", has_media=False, error=str(exc))
 
 
-# Interactive login helpers: GUI passes dialog callbacks, CLI passes input().
-# code_cb is kept for API compat but unused (login is via client.start).
-PhoneCb = Callable[[], Awaitable[str]]
-CodeCb = Callable[[], Awaitable[str]]
-PasswordCb = Callable[[], Awaitable[str]]
-
-
-async def login_interactive(client: TelegramClient, phone_cb: PhoneCb, code_cb: CodeCb,
-                            password_cb: PasswordCb,
-                            log: Callable[[str], Any] = print) -> str:
-    """Perform first-time login. Returns display name. Raises on failure."""
-    await ensure_connected(client)
-    if await client.is_user_authorized():
-        me = await client.get_me()
-        return getattr(me, "first_name", None) or getattr(me, "username", None) or "Telegram user"
-    phone = (await phone_cb()).strip()
-    if not phone:
-        raise RuntimeError("Phone number or bot token cannot be empty.")
-    try:
-        # Single canonical router: phones via phone=, tokens via bot_token=.
-        # Never call send_code_request manually (client.start handles it);
-        # the old pre-send fired even for bot tokens and spammed SMS.
-        if looks_like_phone(phone):
-            await client.start(phone=phone)
-        else:
-            await client.start(bot_token=phone)
-    except errors.SessionPasswordNeededError:
-        pw = await password_cb()
-        try:
-            await client.sign_in(password=pw)
-        finally:
-            # Best-effort: drop the 2FA secret from the local namespace.
-            try:
-                del pw
-            except NameError:
-                pass
-    me = await client.get_me()
-    name = getattr(me, "first_name", None) or getattr(me, "username", None) or "Telegram user"
-    from .config import _sanitize_display as _sd
-    name = _sd(str(name))
-    log(f"Logged in as {name}")
-    return name
+# Interactive login is handled by callers (cli._login_cli / gui.gui_login)
+# directly through client.start(phone=|bot_token=). There is no shared
+# generic login routine; looks_like_phone is the single router deciding
+# which calling convention to use.

@@ -169,149 +169,175 @@ async def download_resumable(client, message: Message, destination: Path,
         destination.unlink(missing_ok=True)
         existing = 0
 
-    # Use O_NOFOLLOW to prevent writing through a swapped-in link. Python's
-    # Path.open follows links; use os.open with O_NOFOLLOW|O_EXCL semantics.
+    # Open ONCE for the whole transfer and verify via fstat on the held fd.
+    # Path.open follows links, and the old per-chunk open with O_APPEND let a
+    # concurrent process append garbage between chunks while the final size
+    # check still passed. A single fd + fstat length verification before every
+    # write makes concurrent modification detectable; a path swap mid-transfer
+    # just orphans writes to the old inode instead of ever writing through a
+    # planted link (our writes never re-open, so ELOOP cannot bite later).
     import os as _os
     nofollow = getattr(_os, "O_NOFOLLOW", 0)
-    mode = "ab" if existing else "wb"
     current = existing
     await _emit(progress_cb, current, total)
     attempt = 0
     flood_waits = 0
     MAX_FLOODWAITS = 3
 
-    while current < total:
-        if cancel is not None and cancel.is_set():
-            raise Cancelled(f"Cancelled at {current}/{total} bytes; partial file kept.")
+    flags = _os.O_WRONLY | _os.O_CREAT | nofollow
+    flags |= _os.O_APPEND if existing else _os.O_TRUNC
+    if cancel is not None and cancel.is_set():
+        # Nothing has been opened/written yet: a cancelled-before-start must
+        # not leave a 0-byte placeholder file behind.
+        raise Cancelled(f"Cancelled before download started; nothing written to {destination}.")
+    try:
+        fd = _os.open(destination, flags, 0o600)
+    except OSError as exc:
+        import errno as _errno
+        if exc.errno == _errno.ELOOP:
+            raise DownloadError(f"Refusing to write through a symlink at {destination}.") from exc
+        raise DownloadError(f"Could not open {destination}: {exc}") from exc
+    try:
         try:
-            async for chunk in client.iter_download(
-                location,
-                offset=current,
-                request_size=CHUNK_SIZE,
-                chunk_size=CHUNK_SIZE,
-                file_size=total,
-                dc_id=dc_id,
-            ):
-                if cancel is not None and cancel.is_set():
-                    raise Cancelled(f"Cancelled at {current}/{total} bytes; partial file kept.")
-                # Re-check the link didn't get swapped mid-download, and
-                # enforce the size cap on bytes actually written (a hostile
-                # stream could otherwise exceed the declared total).
-                try:
-                    if destination.is_symlink() or _any_symlink_in_chain(destination):
-                        raise Cancelled(
-                            f"Symlink appeared at {destination}; aborting.")
-                except Cancelled:
-                    raise
-                except OSError:
-                    pass
-                # Pre-check cap before writing: avoid overshoot by CHUNK_SIZE.
-                if current + len(chunk) > MAX_FILE_BYTES:
-                    raise DownloadError(
-                        f"Download would exceed the {MAX_FILE_BYTES} cap; aborted.")
-                # O_NOFOLLOW open: writing through a swapped-in link raises ELOOP
-                import os as _os2
-                nofollow2 = getattr(_os2, "O_NOFOLLOW", 0)
-                flags = _os2.O_WRONLY | _os2.O_CREAT | _os2.O_APPEND if mode == "ab" else _os2.O_WRONLY | _os2.O_CREAT | _os2.O_TRUNC
-                flags |= nofollow2
-                try:
-                    fd = _os2.open(destination, flags, 0o600)
-                except OSError as exc:
-                    import errno as _errno
-                    if exc.errno == _errno.ELOOP:
-                        raise Cancelled(f"Symlink detected at {destination}; aborting.") from exc
-                    raise
-                try:
-                    # fd is append/trunc already; write chunk. A short write
-                    # on a regular file means the disk is full — surface it
-                    # instead of silently corrupting the download.
-                    _written = _os2.write(fd, chunk)
+            actual = _os.fstat(fd).st_size
+        except OSError:
+            actual = -1
+        if actual != current:
+            # On-disk size drifted between our earlier path.stat() and the
+            # open (concurrent writer / poisoned partial). Never trust the
+            # tail: truncate the SAME inode and start over from 0.
+            try:
+                _os.ftruncate(fd, 0)
+            except OSError as exc:
+                raise DownloadError(
+                    f"Could not reset suspicious partial {destination}: {exc}") from exc
+            current = 0
+
+        while current < total:
+            if cancel is not None and cancel.is_set():
+                raise Cancelled(f"Cancelled at {current}/{total} bytes; partial file kept.")
+            # Length drift detection: if the file grew or shrank beneath our fd,
+            # somebody else wrote to it — abort rather than produce a file that
+            # still passes the final size check.
+            try:
+                if _os.fstat(fd).st_size != current:
+                    raise Cancelled(
+                        f"Concurrent modification detected at {destination} "
+                        f"({_os.fstat(fd).st_size}/{current} bytes); aborting.")
+            except Cancelled:
+                raise
+            except OSError:
+                pass
+            try:
+                async for chunk in client.iter_download(
+                    location,
+                    offset=current,
+                    request_size=CHUNK_SIZE,
+                    chunk_size=CHUNK_SIZE,
+                    file_size=total,
+                    dc_id=dc_id,
+                ):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled(f"Cancelled at {current}/{total} bytes; partial file kept.")
+                    # Enforce the cap on bytes actually written (a hostile stream
+                    # could otherwise exceed the declared total). The chunk goes
+                    # through our single held fd at EOF, so there is no re-open.
+                    if current + len(chunk) > MAX_FILE_BYTES:
+                        raise DownloadError(
+                            f"Download would exceed the {MAX_FILE_BYTES} cap; aborted.")
+                    _written = _os.write(fd, chunk)
                     if _written != len(chunk):
                         raise DownloadError(
                             f"Short write: {_written} of {len(chunk)} bytes — "
                             f"disk full? Partial file kept at {destination}")
                     try:
-                        _os2.fsync(fd)
+                        _os.fsync(fd)
                     except OSError:
                         pass
-                finally:
-                    try:
-                        _os2.close(fd)
-                    except OSError:
-                        pass
-                mode = "ab"
-                current += _written
-                if current > MAX_FILE_BYTES:
+                    current += _written
+                    if current > MAX_FILE_BYTES:
+                        raise DownloadError(
+                            f"Download exceeded the {MAX_FILE_BYTES} cap; aborted.")
+                    await _emit(progress_cb, current, total)
+                break
+            except Cancelled:
+                raise
+            except errors.FloodWaitError as exc:
+                flood_waits += 1
+                if flood_waits > MAX_FLOODWAITS:
                     raise DownloadError(
-                        f"Download exceeded the {MAX_FILE_BYTES} cap; aborted.")
-                await _emit(progress_cb, current, total)
-            break
-        except Cancelled:
-            raise
-        except errors.FloodWaitError as exc:
-            flood_waits += 1
-            if flood_waits > MAX_FLOODWAITS:
-                raise DownloadError(
-                    f"Telegram rate-limit repeated {flood_waits} times; aborting. "
-                    f"Partial file kept at:\n{destination}"
-                ) from exc
-            secs = int(exc.seconds)
-            if secs > MAX_FLOODWAIT_SECONDS:
-                raise DownloadError(
-                    f"Telegram rate-limit is {secs}s — too long to wait. "
-                    f"Partial file kept at:\n{destination}"
-                ) from exc
-            wait = min(secs + 1, MAX_FLOODWAIT_SECONDS)
-            if cancel is not None:
-                # Sleep cooperatively so Cancel works during rate-limit waits.
+                        f"Telegram rate-limit repeated {flood_waits} times; aborting. "
+                        f"Partial file kept at:\n{destination}"
+                    ) from exc
+                secs = int(exc.seconds)
+                if secs > MAX_FLOODWAIT_SECONDS:
+                    raise DownloadError(
+                        f"Telegram rate-limit is {secs}s — too long to wait. "
+                        f"Partial file kept at:\n{destination}"
+                    ) from exc
+                wait = min(secs + 1, MAX_FLOODWAIT_SECONDS)
+                if cancel is not None:
+                    # Sleep cooperatively so Cancel works during rate-limit waits.
+                    try:
+                        await asyncio.wait_for(cancel.wait(), timeout=wait)
+                        raise Cancelled(f"Cancelled during rate-limit wait; partial kept at {destination}.")
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(wait)
+                # Do NOT reset attempt: a burst of FloodWaits must not give
+                # infinite retries via the transfer-retry budget.
+            except (asyncio.TimeoutError, TimeoutError, OSError, ConnectionError) as exc:
+                attempt += 1
+                if attempt > MAX_TRANSFER_RETRIES:
+                    raise DownloadError(
+                        f"Connection failed after {MAX_TRANSFER_RETRIES} retries "
+                        f"at {current}/{total} bytes. Partial file kept at:\n{destination}"
+                    ) from exc
+                delay = min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45)
                 try:
-                    await asyncio.wait_for(cancel.wait(), timeout=wait)
-                    raise Cancelled(f"Cancelled during rate-limit wait; partial kept at {destination}.")
-                except asyncio.TimeoutError:
+                    await client.disconnect()
+                except Exception:
                     pass
-            else:
-                await asyncio.sleep(wait)
-            # Do NOT reset attempt: a burst of FloodWaits must not give
-            # infinite retries via the transfer-retry budget.
-        except (asyncio.TimeoutError, TimeoutError, OSError, ConnectionError) as exc:
-            attempt += 1
-            if attempt > MAX_TRANSFER_RETRIES:
-                raise DownloadError(
-                    f"Connection failed after {MAX_TRANSFER_RETRIES} retries "
-                    f"at {current}/{total} bytes. Partial file kept at:\n{destination}"
-                ) from exc
-            delay = min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45)
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            await _retry_sleep(cancel, delay, destination)
-            try:
-                await client.connect()
-            except Exception:
-                pass
-        except (errors.ServerError, errors.RpcCallFailError) as exc:
-            attempt += 1
-            if attempt > MAX_TRANSFER_RETRIES:
-                raise DownloadError(
-                    f"Telegram repeatedly failed the transfer at {current} bytes. "
-                    f"Partial file kept at {destination}."
-                ) from exc
-            await _retry_sleep(cancel, min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45), destination)
-        except errors.RPCError as exc:
-            # Transient RPC errors (FileReferenceExpiredError, etc.) are
-            # retried like other network failures; non-retryable ones
-            # (ChannelPrivateError, etc.) surface as DownloadError so the
-            # caller can mark the queue item as failed cleanly.
-            attempt += 1
-            if attempt > MAX_TRANSFER_RETRIES:
-                raise DownloadError(
-                    f"Telegram RPC error after {MAX_TRANSFER_RETRIES} retries at "
-                    f"{current}/{total} bytes: {exc}. Partial kept at {destination}."
-                ) from exc
-            await _retry_sleep(cancel, min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45), destination)
+                await _retry_sleep(cancel, delay, destination)
+                try:
+                    await client.connect()
+                except Exception:
+                    pass
+            except (errors.ServerError, errors.RpcCallFailError) as exc:
+                attempt += 1
+                if attempt > MAX_TRANSFER_RETRIES:
+                    raise DownloadError(
+                        f"Telegram repeatedly failed the transfer at {current} bytes. "
+                        f"Partial file kept at {destination}."
+                    ) from exc
+                await _retry_sleep(cancel, min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45), destination)
+            except errors.RPCError as exc:
+                # Transient RPC errors (FileReferenceExpiredError, etc.) are
+                # retried like other network failures; non-retryable ones
+                # (ChannelPrivateError, etc.) surface as DownloadError so the
+                # caller can mark the queue item as failed cleanly.
+                attempt += 1
+                if attempt > MAX_TRANSFER_RETRIES:
+                    raise DownloadError(
+                        f"Telegram RPC error after {MAX_TRANSFER_RETRIES} retries at "
+                        f"{current}/{total} bytes: {exc}. Partial kept at {destination}."
+                    ) from exc
+                await _retry_sleep(cancel, min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45), destination)
 
-    if not destination.exists() or destination.stat().st_size != total:
-        got = destination.stat().st_size if destination.exists() else 0
-        raise DownloadError(f"Incomplete file ({got}/{total} bytes). Partial kept at {destination}.")
-    return destination
+        # Verify length from the held fd, never a path stat: the path can be
+        # swapped while the fd stays pinned to the original inode we wrote to.
+        try:
+            final_size = _os.fstat(fd).st_size
+        except OSError:
+            final_size = -1
+        if final_size != total:
+            got = final_size if final_size >= 0 else 0
+            raise DownloadError(
+                f"Incomplete file ({got}/{total} bytes). Partial kept at {destination}.")
+        return destination
+    finally:
+        try:
+            _os.close(fd)
+        except OSError:
+            pass

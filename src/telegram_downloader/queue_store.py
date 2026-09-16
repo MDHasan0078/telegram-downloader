@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -23,7 +24,7 @@ MAX_NUM_FIELD = MAX_FILE_BYTES
 _MODES = ("1", "2", "3")
 # Never reflect dunder keys: a crafted queue.json with "__class__" (or
 # __dict__/__globals__) previously hit `setattr` and crashed the app on
-# startup with an unhandled TypeError (DoS). Block them at every entry.
+# startup with an unhandled TypeError (DoS). Blocked at every entry.
 _FORBIDDEN_KEYS = frozenset(k for k in dir(object))
 _EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,10}")
 
@@ -54,7 +55,9 @@ def _sanitize_item(it: "DownloadItem") -> "DownloadItem":
     it.title = _sanitize_str(it.title)
     it.error = _sanitize_str(it.error)
     it.dest = _sanitize_str(it.dest)
-    if it.ext and not _EXT_RE.fullmatch(it.ext):
+    if not isinstance(it.ext, str):
+        it.ext = ".mp4"  # a crafted int/float must not crash re.fullmatch
+    elif it.ext and not _EXT_RE.fullmatch(it.ext):
         it.ext = ".mp4"
     it.size = _sanitize_num(it.size)
     it.current_bytes = _sanitize_num(it.current_bytes)
@@ -66,6 +69,11 @@ def _sanitize_item(it: "DownloadItem") -> "DownloadItem":
         it.mode = "1"
     if not isinstance(it.id, str) or not it.id or len(it.id) > 64:
         it.id = uuid.uuid4().hex[:12]
+    try:
+        ts = float(it.added_at)
+    except (TypeError, ValueError):
+        ts = 0.0
+    it.added_at = ts if math.isfinite(ts) and ts >= 0 else 0.0
     return it
 
 
@@ -105,9 +113,15 @@ class DownloadItem:
                     continue
             if k == "mode" and v not in _MODES:
                 continue
-            if hasattr(it, k) and isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            if k in _ALLOWED_FIELDS and isinstance(v, (str, int, float)) and not isinstance(v, bool):
                 setattr(it, k, v)
         return _sanitize_item(it)
+
+
+# Only the concrete dataclass fields are ever settable. `hasattr` is NOT
+# enough: a crafted file with {"to_dict": "boom"} shadows the method and
+# turns the next save() into "str not callable" (persistent crash).
+_ALLOWED_FIELDS = frozenset(f.name for f in fields(DownloadItem))
 
 
 class QueueStore:
@@ -125,12 +139,7 @@ class QueueStore:
             if self.path.is_symlink():
                 raise ValueError("refusing to load queue through symlink")
             if self.path.exists():
-                try:
-                    if self.path.stat().st_size > MAX_QUEUE_BYTES:
-                        raise ValueError("queue file too large")
-                except OSError:
-                    pass
-                # O_NOFOLLOW open + fstat: close the check-then-read swap
+                # O_NOFOLLOW open + fstat: closes the check-then-read swap
                 # window (a link planted after is_symlink() raises ELOOP).
                 nofollow = getattr(os, "O_NOFOLLOW", 0)
                 try:
@@ -141,9 +150,21 @@ class QueueStore:
                         raise ValueError("refusing to load queue through symlink") from exc
                     raise
                 try:
+                    # fstat of the *held* fd (not path.stat()): closes the
+                    # TOCTOU where a 1-byte file is swapped for a 500MB one
+                    # between the size check and the read.
+                    if os.fstat(fd).st_size > MAX_QUEUE_BYTES:
+                        raise ValueError("queue file too large")
+                except OSError:
+                    pass
+                try:
                     with os.fdopen(fd, "r", encoding="utf-8") as fh:
                         fd = -1
-                        raw = json.load(fh)
+                        raw = json.load(
+                            fh,
+                            parse_constant=lambda x: (_ for _ in ()).throw(
+                                ValueError("non-finite number in queue")),
+                        )
                 finally:
                     if fd != -1:
                         try:
@@ -160,8 +181,10 @@ class QueueStore:
                     if it.status in ("downloading", "converting", "fetching"):
                         it.status = "queued"
                 harden_private_file(self.path)
-        except (OSError, ValueError):
-            # Never lose user data silently: back up the corrupt file first.
+        except (OSError, ValueError, TypeError, RuntimeError):
+            # Corruption must never crash startup: back up then start clean.
+            # (RecursionError, a RuntimeError subclass, can be raised by
+            # json.load on adversarial nesting; TypeError by json parse.)
             # Cap pile-up: keep only last 5 backups, delete oldest.
             try:
                 if self.path.exists() and not self.path.is_symlink():
@@ -248,20 +271,16 @@ class QueueStore:
         for k, v in kw.items():
             if k in _FORBIDDEN_KEYS or k.startswith("__"):
                 continue  # dunder/object attrs can never be set (DoS guard)
-            if not hasattr(it, k):
+            if k not in _ALLOWED_FIELDS:
+                continue  # method names (to_dict/from_dict) shadow nothing here
+            if k == "id" and (not isinstance(v, str) or not v or len(v) > 64):
                 continue
-            # Skip (don't coerce) invalid enum values so callers can't
-            # inject bad state; scalar clamps reuse the shared helpers.
-            if k in ("url", "title", "error", "dest") and isinstance(v, str):
-                v = _sanitize_str(v)
             if k == "ext" and isinstance(v, str):
                 if v and not _EXT_RE.fullmatch(v):
                     continue
             if k == "status" and v not in STATUSES:
                 continue
             if k == "mode" and v not in _MODES:
-                continue
-            if k == "id" and (not isinstance(v, str) or len(v) > 64):
                 continue
             if k == "progress":
                 try:
@@ -278,6 +297,9 @@ class QueueStore:
             if not isinstance(v, (str, int, float)):
                 continue
             setattr(it, k, v)
+        # update() does not run the from_dict gate; run the same single
+        # validator so e.g. empty ids / non-string ext can never persist.
+        _sanitize_item(it)
         self._emit()
 
     def remove(self, item_id: str) -> None:

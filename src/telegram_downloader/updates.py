@@ -120,7 +120,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
                 or parts.username or parts.password
                 or parts.port not in (None, 443)):
             return None
-        keep_auth = (req.host == parts.hostname)
+        keep_auth = (str(req.host).split(":", 1)[0].lower() == parts.hostname)
         hdrs = {k: v for k, v in req.headers.items() if k.lower() not in ("authorization",)}
         if keep_auth and "Authorization" in req.headers:
             hdrs["Authorization"] = req.headers["Authorization"]
@@ -141,16 +141,17 @@ def _urlopen_no_redirect(req: urllib.request.Request, timeout: int,
     return opener.open(req, timeout=timeout)
 
 
-_VERSION_RE = re.compile(r"^v?\d+\.\d+\.\d+\Z")
+_VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+\Z")
 # Bound to our repo: any other owner/repo must not open as a trusted update.
-# Use \Z not $ to block trailing \n injection.
+# Use \Z not $ to block trailing \n injection. ASCII [0-9] only — never \d,
+# whose Unicode digit set would let a non-ASCII "version" match.
 _RELEASE_URL_RE = re.compile(
-    rf"^https://github\.com/{re.escape(REPO)}/releases/tag/v?\d+\.\d+\.\d+\Z")
+    rf"^https://github\.com/{re.escape(REPO)}/releases/tag/v?[0-9]+\.[0-9]+\.[0-9]+\Z")
 # Version-bound, case-sensitive, no traversal: only our exact release
 # filenames are ever downloaded. \Z blocks trailing newline bypass.
 # (No .exe: there is no Windows build job.)
 _ASSET_NAME_RE = re.compile(
-    r"^telegram-downloader_\d+\.\d+\.\d+(_amd64)?\.(deb|dmg|apk)\Z")
+    r"^telegram-downloader_[0-9]+\.[0-9]+\.[0-9]+(_amd64)?\.(deb|dmg|apk)\Z")
 
 # Per-platform checksum files published alongside the installers.
 # Exact names only — never fetched from an untrusted listing.
@@ -295,17 +296,29 @@ def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30,
 
 
 def _verify_file_sha256(path, digest: str) -> None:
+    """SHA256-verify a file by opening it through O_NOFOLLOW and hashing the
+    held fd. Hashing by path lets a swap between our hash and the caller's
+    publish/browse introduce tampered bytes; an fd-based hash verifies the
+    exact inode we are about to publish."""
+    import os as _os
     import hashlib
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    import hmac as _hmac
+    nofollow = getattr(_os, "O_NOFOLLOW", 0)
+    fd = _os.open(path, _os.O_RDONLY | nofollow)
+    try:
+        h = hashlib.sha256()
         while True:
-            chunk = fh.read(1024 * 256)
+            chunk = _os.read(fd, 1024 * 256)
             if not chunk:
                 break
             h.update(chunk)
-    import hmac as _hmac
-    if not _hmac.compare_digest(h.hexdigest(), digest.lower()):
-        raise ValueError("SHA256 mismatch — installer may be tampered; refusing.")
+        if not _hmac.compare_digest(h.hexdigest(), digest.lower()):
+            raise ValueError("SHA256 mismatch — installer may be tampered; refusing.")
+    finally:
+        try:
+            _os.close(fd)
+        except OSError:
+            pass
 
 
 def open_release_page(url: str) -> None:
@@ -378,6 +391,8 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
     req = urllib.request.Request(asset.url, headers={"User-Agent": "telegram-downloader",
                                                         "Authorization": f"Bearer {token}" if token else "telegram-downloader"})
     total = 0
+    import time as _time
+    deadline = _time.monotonic() + 3600  # hard stop for a slow/hung CDN stream
     fd = _os.open(tmp, _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | nofollow, 0o600)
     try:
         with _urlopen_no_redirect(req, timeout=60, token=token or None) as resp:
@@ -398,6 +413,8 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
                     total += len(chunk)
                     if total > MAX_ASSET_BYTES:
                         raise ValueError("Asset exceeded the size cap during download.")
+                    if _time.monotonic() > deadline:
+                        raise ValueError("Asset download exceeded the time budget; aborted.")
                     fh.write(chunk)
     except BaseException:
         if fd != -1:
@@ -421,6 +438,7 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
             pass
         raise
     _harden(tmp)
+    verified_digest: str | None = None
     if tag_version:
         checksum_name = _checksum_name_for(name)
         if checksum_name is None:
@@ -445,7 +463,21 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
             except OSError:
                 pass
             raise
+        verified_digest = digest
     tmp.replace(dest)
+    # Re-verify the PUBLISHED file through O_NOFOLLOW: closes the window
+    # where tmp was swapped after the checksum pass (a planted symlink or
+    # replaced inode right before rename would otherwise present itself as
+    # the trusted installer).
+    if verified_digest is not None:
+        try:
+            _verify_file_sha256(dest, verified_digest)
+        except ValueError:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     try:
         dest.chmod(0o600 & ~0o111)
     except OSError:
