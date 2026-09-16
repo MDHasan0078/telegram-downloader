@@ -31,9 +31,10 @@ set -euo pipefail
 APP=/opt/telegram-downloader
 SYS_VENV="$APP/.venv"
 USER_VENV="${XDG_DATA_HOME:-$HOME/.local/share}/telegram-downloader/.venv"
-# Prefer the system venv (created by root/admin on first run); otherwise
-# use a per-user venv since regular users cannot write to /opt.
-if [ -x "$SYS_VENV/bin/python" ] || [ -w "$APP" ]; then
+# Prefer the system venv only if we can write to it (root/admin, or a
+# user-writable install); otherwise use a per-user venv since regular
+# users cannot write to /opt (a stale root-owned venv must NOT be reused).
+if [ -w "$SYS_VENV" ] || { [ ! -e "$SYS_VENV" ] && [ -w "$APP" ]; }; then
   VENV="$SYS_VENV"
 else
   VENV="$USER_VENV"
