@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .config import QUEUE_FILE, _atomic_write, harden_private_file
+from .constants import MAX_FILE_BYTES
 
 STATUSES = ("queued", "preview", "fetching", "downloading", "converting",
             "done", "error", "cancelled")
@@ -17,6 +19,47 @@ STATUSES = ("queued", "preview", "fetching", "downloading", "converting",
 MAX_QUEUE_ITEMS = 1000
 MAX_QUEUE_BYTES = 5 * 1024 * 1024
 MAX_STR_FIELD = 500
+MAX_NUM_FIELD = MAX_FILE_BYTES
+_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,10}")
+
+
+def _sanitize_str(v: Any) -> str:
+    """Clamp length + strip control chars (display/log injection)."""
+    s = v if isinstance(v, str) else ""
+    s = re.sub(r"[\x00-\x1f\x7f]", "?", s)
+    return s[:MAX_STR_FIELD]
+
+
+def _sanitize_num(v: Any, is_float: bool = False) -> Any:
+    try:
+        n = float(v or 0) if is_float else int(v or 0)
+    except (TypeError, ValueError):
+        return 0.0 if is_float else 0
+    if is_float:
+        return max(0.0, min(100.0, n))
+    return max(0, min(MAX_NUM_FIELD, n))
+
+
+def _sanitize_item(it: "DownloadItem") -> "DownloadItem":
+    """Single validator for every entry path (add/extend/update/from_dict).
+
+    Previously each path clamped a different subset and they drifted.
+    """
+    it.url = _sanitize_str(it.url)
+    it.title = _sanitize_str(it.title)
+    it.error = _sanitize_str(it.error)
+    it.dest = _sanitize_str(it.dest)
+    if it.ext and not _EXT_RE.fullmatch(it.ext):
+        it.ext = ".mp4"
+    it.size = _sanitize_num(it.size)
+    it.current_bytes = _sanitize_num(it.current_bytes)
+    it.total_bytes = _sanitize_num(it.total_bytes)
+    it.progress = _sanitize_num(it.progress, is_float=True)
+    if it.status not in STATUSES:
+        it.status = "queued"
+    if not isinstance(it.id, str) or not it.id or len(it.id) > 64:
+        it.id = uuid.uuid4().hex[:12]
+    return it
 
 
 @dataclass
@@ -42,31 +85,17 @@ class DownloadItem:
         it = DownloadItem()
         if not isinstance(d, dict):
             return it
-        try:
-            if "progress" in d:
-                d = dict(d)
-                d["progress"] = max(0.0, min(100.0, float(d.get("progress") or 0)))
-            for numkey in ("size", "current_bytes", "total_bytes"):
-                if numkey in d:
-                    d = dict(d)
-                    d[numkey] = max(0, min(8 * 1024 ** 3, int(d.get(numkey) or 0)))
-        except (TypeError, ValueError):
-            pass
         for k, v in d.items():
             if k == "status" and v not in STATUSES:
                 continue  # corrupt status: leave as default "queued"
             if k == "id" and (not isinstance(v, str) or len(v) > 64):
                 continue  # corrupt id: keep the generated one
-            if k in ("url", "title", "ext", "error", "dest") and isinstance(v, str):
-                if len(v) > MAX_STR_FIELD:
-                    v = v[:MAX_STR_FIELD]
             if k == "ext" and isinstance(v, str):
-                import re as _re
-                if v and not _re.fullmatch(r"\.[A-Za-z0-9]{1,10}", v):
+                if v and not _EXT_RE.fullmatch(v):
                     continue
             if hasattr(it, k) and isinstance(v, (str, int, float)) and not isinstance(v, bool):
                 setattr(it, k, v)
-        return it
+        return _sanitize_item(it)
 
 
 class QueueStore:
@@ -89,7 +118,26 @@ class QueueStore:
                         raise ValueError("queue file too large")
                 except OSError:
                     pass
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                # O_NOFOLLOW open + fstat: close the check-then-read swap
+                # window (a link planted after is_symlink() raises ELOOP).
+                nofollow = getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    fd = os.open(self.path, os.O_RDONLY | nofollow)
+                except OSError as exc:
+                    import errno as _errno
+                    if exc.errno == _errno.ELOOP:
+                        raise ValueError("refusing to load queue through symlink") from exc
+                    raise
+                try:
+                    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                        fd = -1
+                        raw = json.load(fh)
+                finally:
+                    if fd != -1:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
                 if not isinstance(raw, list):
                     raise ValueError("queue file must contain a list")
                 if len(raw) > MAX_QUEUE_ITEMS:
@@ -129,6 +177,12 @@ class QueueStore:
             if len(self.items) > MAX_QUEUE_ITEMS:
                 self.items = self.items[-MAX_QUEUE_ITEMS:]
             data = json.dumps([i.to_dict() for i in self.items], indent=2).encode("utf-8")
+            # Never silently drop the whole save when oversized: evict
+            # oldest items until it fits (active downloads are newest-first
+            # in practice since extend appends).
+            while len(data) > MAX_QUEUE_BYTES and len(self.items) > 1:
+                self.items = self.items[1:]
+                data = json.dumps([i.to_dict() for i in self.items], indent=2).encode("utf-8")
             if len(data) > MAX_QUEUE_BYTES:
                 return
             _atomic_write(self.path, data)
@@ -150,16 +204,7 @@ class QueueStore:
     def add(self, item: DownloadItem) -> DownloadItem:
         if len(self.items) >= MAX_QUEUE_ITEMS:
             return item
-        # Clamp oversized fields on the way in (mirrors from_dict).
-        if len(item.title) > MAX_STR_FIELD:
-            item.title = item.title[:MAX_STR_FIELD]
-        if len(item.error) > MAX_STR_FIELD:
-            item.error = item.error[:MAX_STR_FIELD]
-        if len(item.dest) > MAX_STR_FIELD:
-            item.dest = item.dest[:MAX_STR_FIELD]
-        if len(item.url) > MAX_STR_FIELD:
-            item.url = item.url[:MAX_STR_FIELD]
-        self.items.append(item)
+        self.items.append(_sanitize_item(item))
         self._emit()
         return item
 
@@ -168,31 +213,7 @@ class QueueStore:
         room = MAX_QUEUE_ITEMS - len(self.items)
         if room <= 0:
             return
-        # Clamp fields like add() does — prevents store.extend() bypass.
-        clamped: list[DownloadItem] = []
-        for it in items[:room]:
-            if len(it.title) > MAX_STR_FIELD:
-                it.title = it.title[:MAX_STR_FIELD]
-            if len(it.error) > MAX_STR_FIELD:
-                it.error = it.error[:MAX_STR_FIELD]
-            if len(it.dest) > MAX_STR_FIELD:
-                it.dest = it.dest[:MAX_STR_FIELD]
-            if len(it.url) > MAX_STR_FIELD:
-                it.url = it.url[:MAX_STR_FIELD]
-            if it.ext and not __import__("re").fullmatch(r"\.[A-Za-z0-9]{1,10}", it.ext):
-                it.ext = ".mp4"
-            # Numeric caps also clamped (mirrors from_dict)
-            try:
-                it.size = max(0, min(8 * 1024 ** 3, int(it.size or 0)))
-                it.current_bytes = max(0, min(8 * 1024 ** 3, int(it.current_bytes or 0)))
-                it.total_bytes = max(0, min(8 * 1024 ** 3, int(it.total_bytes or 0)))
-                it.progress = max(0.0, min(100.0, float(it.progress or 0)))
-            except (TypeError, ValueError):
-                pass
-            if it.status not in STATUSES:
-                it.status = "queued"
-            clamped.append(it)
-        self.items.extend(clamped)
+        self.items.extend(_sanitize_item(it) for it in items[:room])
         self._emit()
 
     def get(self, item_id: str) -> Optional[DownloadItem]:
@@ -208,12 +229,12 @@ class QueueStore:
         for k, v in kw.items():
             if not hasattr(it, k):
                 continue
-            # Reuse from_dict validation so callers can't bypass caps.
+            # Skip (don't coerce) invalid enum values so callers can't
+            # inject bad state; scalar clamps reuse the shared helpers.
             if k in ("url", "title", "error", "dest") and isinstance(v, str):
-                v = v[:MAX_STR_FIELD]
+                v = _sanitize_str(v)
             if k == "ext" and isinstance(v, str):
-                import re as _re
-                if v and not _re.fullmatch(r"\.[A-Za-z0-9]{1,10}", v):
+                if v and not _EXT_RE.fullmatch(v):
                     continue
             if k == "status" and v not in STATUSES:
                 continue
@@ -221,12 +242,12 @@ class QueueStore:
                 continue
             if k == "progress":
                 try:
-                    v = max(0.0, min(100.0, float(v or 0)))
+                    v = _sanitize_num(v, is_float=True)
                 except (TypeError, ValueError):
                     continue
             if k in ("size", "current_bytes", "total_bytes"):
                 try:
-                    v = max(0, min(8 * 1024 ** 3, int(v or 0)))
+                    v = _sanitize_num(v)
                 except (TypeError, ValueError):
                     continue
             if isinstance(v, bool):

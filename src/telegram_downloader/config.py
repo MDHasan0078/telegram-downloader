@@ -118,6 +118,17 @@ class Settings:
     def has_api(self) -> bool:
         return bool(self.api_id and self.api_hash)
 
+    def api_id_int(self) -> int:
+        """Validated int form of api_id (stored as str for JSON compat).
+
+        Single canonical cast — callers must use this instead of
+        scattering int(str(...)) conversions.
+        """
+        try:
+            return int(str(self.api_id or "").strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError("API ID must be numeric.") from exc
+
 
 def default_download_dir() -> Path:
     return Path.home() / "Downloads" / "Telegram"
@@ -182,9 +193,10 @@ def _ensure_dirs() -> None:
     # symlink-safe mkdir -p for CONFIG_DIR
     try:
         _mkdir_parents_nofollow(CONFIG_DIR, mode=0o700)
-    except (RuntimeError, OSError):
-        # Fallback: at least ensure leaf exists
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except (RuntimeError, OSError) as exc:
+        # No permissive fallback: a symlink-plant refusal must abort,
+        # never silently follow the link with plain mkdir.
+        raise RuntimeError(f"Refusing unsafe config dir {CONFIG_DIR}: {exc}") from exc
     for p in {CONFIG_DIR, CONFIG_DIR.resolve()}:
         try:
             p.chmod(0o700)
@@ -219,12 +231,8 @@ def _atomic_write(path: Path, data: bytes) -> None:
     _refuse_config_symlink()
     try:
         _mkdir_parents_nofollow(path.parent, mode=0o700)
-    except (RuntimeError, OSError):
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
+    except (RuntimeError, OSError) as exc:
+        raise OSError(f"could not safely create parent of {path}: {exc}") from exc
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     for _ in range(5):
         tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{secrets.token_hex(8)}")
@@ -396,6 +404,9 @@ def load_settings() -> Settings:
     if raw_uid is not None and re.fullmatch(r"\d{1,20}", str(raw_uid)):
         s.user_id = str(raw_uid)
     # Env overrides (do not persist): useful for CI / containers.
+    # WARNING: env vars are visible in `ps e` / /proc/<pid>/environ to
+    # other local users. Prefer interactive entry (getpass) on shared
+    # machines; use env only in throwaway CI/containers.
     if os.environ.get("TG_API_ID"):
         s.api_id = os.environ["TG_API_ID"]
     if os.environ.get("TG_API_HASH"):
@@ -475,11 +486,6 @@ def ensure_download_dir(s: Settings) -> Path:
     # Also reject download dirs with shell meta chars (explorer injection).
     if any(c in str(target) for c in [",", ";", "|", "&", "$", "`"]):
         raise ValueError(f"Refusing download folder with shell meta chars: {target}")
-    try:
-        if str(target).strip() and any(x in os.path.basename(str(target)) for x in []):
-            pass
-    except OSError:
-        pass
     # Containment: never allow the download tree to overlap the config dir
     # (a file named queue.json / session.session would clobber secrets) and
     # never allow filesystem root. Every ancestor is lstat-checked so a

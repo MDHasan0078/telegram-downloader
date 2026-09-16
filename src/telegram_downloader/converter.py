@@ -7,36 +7,47 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
+def _bin(name: str) -> Optional[str]:
+    """Resolve once to an absolute path so a hostile $PATH cannot swap
+    the binary between our check and exec (all call sites use this)."""
+    try:
+        return shutil.which(name)
+    except Exception:
+        return None
+
+
 def has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return _bin("ffmpeg") is not None
 
 
 def has_ffprobe() -> bool:
-    return shutil.which("ffprobe") is not None
+    return _bin("ffprobe") is not None
 
 
 def ffmpeg_version() -> Optional[str]:
-    if not has_ffmpeg():
+    exe = _bin("ffmpeg")
+    if not exe:
         return None
     try:
-        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=10)
         return (r.stdout.splitlines() or [""])[0].strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
 
 
 def probe_codecs(input_path: Path) -> Tuple[Optional[str], Optional[str]]:
-    if not has_ffprobe():
+    exe = _bin("ffprobe")
+    if not exe:
         return None, None
     try:
         v = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [exe, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name",
              "-of", "default=noprint_wrappers=1:nokey=1", "--", str(input_path)],
             capture_output=True, text=True, timeout=30,
         ).stdout.strip() or None
         a = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+            [exe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=codec_name",
              "-of", "default=noprint_wrappers=1:nokey=1", "--", str(input_path)],
             capture_output=True, text=True, timeout=30,
@@ -47,11 +58,12 @@ def probe_codecs(input_path: Path) -> Tuple[Optional[str], Optional[str]]:
 
 
 def ffprobe_has_video(path: Path) -> bool:
-    if not path.exists() or path.stat().st_size <= 0 or not has_ffprobe():
+    exe = _bin("ffprobe")
+    if not path.exists() or path.stat().st_size <= 0 or not exe:
         return False
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [exe, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name",
              "-of", "default=noprint_wrappers=1:nokey=1", "--", str(path)],
             capture_output=True, text=True, timeout=30,
@@ -69,15 +81,24 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2") -> None:
     """
     if not has_ffmpeg():
         raise RuntimeError("ffmpeg is required for MP4 output but was not found.")
+    exe = _bin("ffmpeg")
+    if not exe:
+        raise RuntimeError("ffmpeg is required for MP4 output but was not found.")
+    # Refuse to let ffmpeg -y truncate through a planted symlink/pipe.
+    try:
+        if output_path.is_symlink() or (output_path.exists() and not output_path.is_file()):
+            raise RuntimeError(f"Refusing unsafe ffmpeg output path: {output_path}")
+    except OSError as exc:
+        raise RuntimeError(f"Cannot validate ffmpeg output path: {exc}") from exc
     video_codec, audio_codec = probe_codecs(input_path)
     can_remux = video_codec == "h264" and (audio_codec in {None, "aac"})
     if can_remux:
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y",
                "-i", str(input_path), "-map", "0:v:0?", "-map", "0:a:0?",
                "-c", "copy", "-movflags", "+faststart", "--", str(output_path)]
     else:
         preset = "veryfast" if mode == "2" else "medium"
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y",
                "-i", str(input_path), "-map", "0:v:0?", "-map", "0:a:0?",
                "-c:v", "libx264", "-preset", preset, "-crf", "28",
                "-c:a", "aac", "-b:a", "128k",

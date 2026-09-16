@@ -32,3 +32,5 @@ keys/
 *.deb
 *.apk
 *.aab
+CODESPACES_GIT.md
+conversation.txt

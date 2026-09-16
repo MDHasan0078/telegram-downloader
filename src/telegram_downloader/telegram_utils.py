@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
+from .constants import MAX_URL_LEN, MAX_URL_LIST_BYTES, MAX_URLS
+
 ChatRef = Union[str, int]
 
 
@@ -13,7 +15,7 @@ def parse_message_url(url: str) -> Tuple[ChatRef, int, Optional[int]]:
     if not isinstance(url, str):
         raise ValueError("Telegram URL must be text.")
     url = url.strip()
-    if len(url) > 2000:
+    if len(url) > MAX_URL_LEN:
         raise ValueError("Telegram URL too long.")
     patterns = [
         # t.me/c/<internal id>/<msg> or /<thread>/<msg>
@@ -73,7 +75,7 @@ def format_bytes(value: int) -> str:
         if n < 1024 or unit == units[-1]:
             return f"{n:.1f} {unit}"
         n /= 1024
-    return f"{value} B"
+    return f"{n:.1f} {units[-1]}"  # unreachable, keeps type-checkers quiet
 
 
 def infer_extension(message) -> str:
@@ -124,7 +126,7 @@ def auto_title_from_message(message, chat) -> str:
     return safe_filename(title)
 
 
-def split_urls(raw: str, limit: int = 100) -> list[str]:
+def split_urls(raw: str, limit: int = MAX_URLS) -> list[str]:
     """Split pasted text / file content into clean URL list (dedup, order kept).
 
     Bounded: caps input chars, per-URL length, and total count so a pasted
@@ -133,15 +135,15 @@ def split_urls(raw: str, limit: int = 100) -> list[str]:
     """
     if not raw:
         return []
-    if len(raw) > 100_000:
-        raw = raw[:100_000]
+    if len(raw) > MAX_URL_LIST_BYTES:
+        raw = raw[:MAX_URL_LIST_BYTES]
     seen: set[str] = set()
     out: list[str] = []
     for chunk in re.split(r"[\s,;]+", raw):
         u = chunk.strip().strip("'\"")
         if not u or u in seen:
             continue
-        if len(u) > 2000:
+        if len(u) > MAX_URL_LEN:
             continue
         # Accept anything looking like t.me; validation happens later so the
         # UI can show per-row errors instead of silently dropping lines.

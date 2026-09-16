@@ -4,7 +4,9 @@
 # Requires: python3, pip, dpkg-deb. Run on Linux.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VER="$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])' 2>/dev/null || echo 0.1.0)"
+# tomllib needs py3.11+; parse with regex so py3.9/3.10 don't silently
+# fall back to a wrong 0.1.0 version (fail loudly instead).
+VER="$(python3 -c 'import re,sys; m=re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M); sys.exit(0 if m else 1); print(m.group(1))')"
 PKG="dist/debroot"
 rm -rf dist "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/opt/telegram-downloader" "$PKG/usr/bin" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps"
@@ -15,22 +17,25 @@ Version: $VER
 Section: video
 Priority: optional
 Architecture: amd64
-Depends: python3, python3-venv, ffmpeg
+Depends: python3, python3-venv, python3-pip, ffmpeg
 Maintainer: tgdownloader <noreply@example.com>
 Description: Telegram media downloader (GUI + CLI)
  Persistent login, resumable downloads, queue, MP4 conversion.
 EOF
 
-cp -r src pyproject.toml README.md "$PKG/opt/telegram-downloader/"
+cp -r src pyproject.toml README.md wheels "$PKG/opt/telegram-downloader/"
 # Prebuild a wheel: installing from source at runtime fails for non-root
 # users (setuptools cannot write egg-info into root-owned /opt).
 pip wheel --no-deps -w "$PKG/opt/telegram-downloader/wheels" . 2>&1 | tail -2
 cat > "$PKG/opt/telegram-downloader/run.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+shopt -s nullglob
 APP=/opt/telegram-downloader
 SYS_VENV="$APP/.venv"
-USER_VENV="${XDG_DATA_HOME:-$HOME/.local/share}/telegram-downloader/.venv"
+# ${HOME:-} + mkdir -p: set -u must not explode when HOME is unset, and
+# the per-user venv parent may not exist yet.
+USER_VENV="${XDG_DATA_HOME:-${HOME:-/root}/.local/share}/telegram-downloader/.venv"
 # Prefer the system venv only if we can write to it (root/admin, or a
 # user-writable install); otherwise use a per-user venv since regular
 # users cannot write to /opt (a stale root-owned venv must NOT be reused).
@@ -39,10 +44,30 @@ if [ -w "$SYS_VENV" ] || { [ ! -e "$SYS_VENV" ] && [ -w "$APP" ]; }; then
 else
   VENV="$USER_VENV"
 fi
+mkdir -p "$(dirname "$VENV")"
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
-# Install from the prebuilt wheel (never touches the root-owned source tree).
-WHEEL=( "$APP"/wheels/*.whl )
-"$VENV/bin/pip" install -q -U "${WHEEL[0]}[gui,speed]" || "$VENV/bin/pip" install -q -U "${WHEEL[0]}"
+# Install from the prebuilt project wheel (never touches the root-owned
+# source tree). pyaes ships sdist-only, so expose our vendored wheel.
+export PIP_FIND_LINKS="$APP/wheels"
+WHEELS=( "$APP"/wheels/telegram_downloader-*.whl )
+if [ "${#WHEELS[@]}" -ne 1 ]; then
+  echo "tg-dl: expected exactly 1 project wheel in $APP/wheels, found ${#WHEELS[@]}" >&2
+  exit 1
+fi
+MARKER="$VENV/.tgdl-version"
+WHEEL_VER="$(basename "${WHEELS[0]}" | sed -E 's/^telegram_downloader-([0-9][^-]*).*/\1/')"
+# Install only when the venv is new or the wheel version changed — not on
+# every launch (network, slow, races concurrent runs).
+if [ ! -f "$MARKER" ] || [ "$(cat "$MARKER" 2>/dev/null)" != "$WHEEL_VER" ]; then
+  if ! "$VENV/bin/pip" install -q -U "${WHEELS[0]}[gui,speed]"; then
+    echo "tg-dl: WARNING: gui/speed extras failed; installing base package only." >&2
+    "$VENV/bin/pip" install -q -U "${WHEELS[0]}" || {
+      echo "tg-dl: ERROR: package install failed." >&2
+      exit 1
+    }
+  fi
+  echo "$WHEEL_VER" > "$MARKER"
+fi
 exec "$VENV/bin/tg-dl" "$@"
 EOF
 chmod +x "$PKG/opt/telegram-downloader/run.sh"
@@ -59,6 +84,7 @@ EOF
 [ -f assets/icon.svg ] && cp assets/icon.svg "$PKG/usr/share/icons/hicolor/scalable/apps/telegram-downloader.svg" || true
 chmod 0755 "$PKG/DEBIAN"
 mkdir -p dist
-dpkg-deb --build "$PKG" "dist/telegram-downloader_${VER}_amd64.deb"
-echo "Built dist/telegram-downloader_${VER}_amd64.deb"
+DEB="dist/telegram-downloader_${VER}_amd64.deb"
+dpkg-deb --build "$PKG" "$DEB"
+echo "Built $DEB"
 echo "Install: sudo dpkg -i dist/*.deb && tg-dl gui"

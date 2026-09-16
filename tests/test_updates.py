@@ -32,6 +32,8 @@ def test_asset_for_platform_versioned():
     assert info.asset_for_platform("android").name.endswith(".apk")
     assert info.asset_for_platform("darwin").name.endswith(".dmg")
     assert info.asset_for_platform("plan9") is None
+    # No Windows build job exists, so no .exe is ever offered.
+    assert info.asset_for_platform("windows") is None
 
 
 def test_asset_fallback_to_suffix():
@@ -68,3 +70,60 @@ def test_check_parses_release(monkeypatch):
     assert info and info.latest_version == "0.3.0"
     assert info.is_newer_than("0.1.0")
     assert info.asset_for_platform("linux").url.startswith("https://github.com/")
+
+
+def test_checksum_name_for():
+    assert upd._checksum_name_for("telegram-downloader_1.0.0_amd64.deb") == "SHA256SUMS-deb"
+    assert upd._checksum_name_for("telegram-downloader_1.0.0.apk") == "SHA256SUMS-apk"
+    assert upd._checksum_name_for("telegram-downloader_1.0.0.dmg") == "SHA256SUMS-dmg"
+    assert upd._checksum_name_for("evil.exe") is None
+
+
+def test_fetch_checksum_parses(monkeypatch):
+    body = (b"abc123" + b"0" * 58 + b"  telegram-downloader_1.0.0_amd64.deb\n"
+            b"not-a-hash  junk\n"
+            b"DEF456" + b"1" * 58 + b" *telegram-downloader_1.0.0.apk\n")
+
+    class FakeResp:
+        status = 200
+        headers = {}
+        def read(self, *a):
+            return body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    seen = {}
+    def fake_open(req, timeout=0):
+        seen["url"] = req.full_url
+        return FakeResp()
+    monkeypatch.setattr(upd, "_urlopen_no_redirect", fake_open)
+    sums = upd._fetch_checksum("SHA256SUMS-deb", "1.0.0")
+    assert seen["url"] == ("https://github.com/MDHasan0078/telegram-downloader"
+                           "/releases/download/v1.0.0/SHA256SUMS-deb")
+    assert sums["telegram-downloader_1.0.0_amd64.deb"] == "abc123" + "0" * 58
+    assert sums["telegram-downloader_1.0.0.apk"] == ("def456" + "1" * 58)
+
+
+def test_fetch_checksum_rejects_bad_name():
+    try:
+        upd._fetch_checksum("../../etc/passwd", "1.0.0")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_verify_file_sha256(tmp_path):
+    import hashlib
+    p = tmp_path / "f.bin"
+    p.write_bytes(b"hello")
+    good = hashlib.sha256(b"hello").hexdigest()
+    upd._verify_file_sha256(p, good)  # must not raise
+    try:
+        upd._verify_file_sha256(p, "0" * 64)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError on mismatch")

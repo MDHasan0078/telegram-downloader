@@ -144,5 +144,7 @@ async def login_interactive(client: TelegramClient, phone_cb: PhoneCb, code_cb: 
                 pass
     me = await client.get_me()
     name = getattr(me, "first_name", None) or getattr(me, "username", None) or "Telegram user"
+    from .config import _sanitize_display as _sd
+    name = _sd(str(name))
     log(f"Logged in as {name}")
     return name

@@ -31,15 +31,21 @@ jobs:
       - run: chmod +x scripts/build-deb.sh && ./scripts/build-deb.sh
       - name: Smoke test .deb contents
         run: |
-          dpkg-deb -f dist/*.deb Package Version Architecture Depends
-          dpkg-deb -c dist/*.deb | grep -E "(usr/bin/tg-dl|opt/telegram-downloader)" | head -5
+          DEB=(dist/*.deb)
+          dpkg-deb -f "$DEB" Package Version Architecture Depends
+          dpkg-deb -c "$DEB" | grep -E "(usr/bin/tg-dl|opt/telegram-downloader)" | head -5
       - uses: actions/upload-artifact@v4
         with: { name: deb, path: dist/*.deb }
+      - name: Checksums
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cd dist && sha256sum *.deb > SHA256SUMS-deb
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.deb
+          files: |
+            dist/*.deb
+            dist/SHA256SUMS-deb
           overwrite_files: true
 
   apk:
@@ -47,21 +53,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
+          grep -E "^version" pyproject.toml
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "17" }
       - run: pip install "flet[all]==0.86.5" && flet doctor || true
       - name: Accept Android SDK licenses
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+        run: |
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            || { echo "cmdline-tools sdkmanager missing at $ANDROID_HOME"; exit 1; }
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
       - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh --debug
+      - name: Rename APK to versioned release name
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          ls -R build
+          APK=(build/apk/*.apk)
+          mv "$APK" "build/apk/telegram-downloader_${VERSION}.apk"
+          ls -la build/apk/
       - uses: actions/upload-artifact@v4
         with: { name: apk, path: build/apk/*.apk }
+      - name: Checksums
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cd build/apk && sha256sum *.apk > SHA256SUMS-apk
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/apk/*.apk
+          files: |
+            build/apk/*.apk
+            build/apk/SHA256SUMS-apk
           overwrite_files: true
 
   dmg:
@@ -69,19 +98,38 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install "flet[all]==0.86.5" && chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
-      - uses: actions/upload-artifact@v4
-        with: { name: macos, path: build/macos/ }
-      - name: Zip macOS app for Release
+      - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          cd build/macos && zip -r -y ../telegram-downloader-macos.zip *.app && cd ../..
-          ls -la build/*.zip
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i '' "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
+          grep -E "^version" pyproject.toml
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: brew install create-dmg
+      - run: pip install "flet[all]==0.86.5" && chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
+      - name: Package versioned .dmg
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          chmod +x scripts/build-dmg.sh
+          APP=(build/macos/*.app)
+          test -d "$APP" || { echo "no .app bundle in build/macos"; ls -R build; exit 1; }
+          mkdir -p dist
+          create-dmg --volname "Telegram Downloader" \
+            "dist/telegram-downloader_${VERSION}.dmg" "$APP"
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: dist/*.dmg }
+      - name: Checksums
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cd dist && sha256sum *.dmg > SHA256SUMS-dmg
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/*.zip
+          files: |
+            dist/*.dmg
+            dist/SHA256SUMS-dmg
           overwrite_files: true

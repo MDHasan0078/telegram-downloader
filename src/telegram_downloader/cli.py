@@ -13,14 +13,13 @@ from . import tg_client
 from .config import (_sanitize_display, clear_session, config_dir_str,
                      default_download_dir, ensure_download_dir,
                      harden_session_files, load_settings, save_settings)
+from .constants import MAX_BATCH_BYTES, MAX_URLS
 from .converter import ffmpeg_to_mp4
 from .downloader import Cancelled, DownloadError, download_resumable
 from .queue_store import DownloadItem, QueueStore
 from .telegram_utils import (auto_title_from_message, format_bytes,
                              infer_extension, parse_message_url, safe_filename,
                              split_urls)
-
-MAX_URLS = 100
 
 
 # ---------------------------------------------------------------- utils
@@ -67,7 +66,7 @@ def _ensure_api(s):
         print()
         _die("API hash entry cancelled.")
     if not api_id or not api_hash:
-        _die("API ID and hash are required (Settings -> API).")
+        _die("API ID and hash are required (Settings → Connection).")
     try:
         int(api_id)
     except ValueError:
@@ -146,7 +145,8 @@ async def _login_cli(client) -> None:
             raise
         except Exception:
             pass
-        print(f"Logged in as: {getattr(me, 'first_name', None) or getattr(me, 'username', None)}")
+        from .config import _sanitize_display as _sd
+        print(f"Logged in as: {_sd(str(getattr(me, 'first_name', None) or getattr(me, 'username', None) or 'Telegram user'))}")
         # Pin the identity on first successful auto-login.
         try:
             st = _load()
@@ -161,7 +161,7 @@ async def _login_cli(client) -> None:
     try:
         # Hidden input: a bot token is a full secret and must not echo to
         # the terminal/scrollback. Phone numbers are hidden too as a result.
-        phone = getpass.getpass("Phone (international, e.g. +8801XXXXXXXXX) or bot token (hidden input): ").strip()
+        phone = getpass.getpass("Phone (international, e.g. +8801XXXXXXXXX) or bot token (input hidden — type carefully): ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         raise RuntimeError("Login cancelled by user.")
@@ -308,9 +308,9 @@ async def cmd_preview(urls: list[str]) -> int:
         urls = urls[:MAX_URLS]
     s = _ensure_api(load_settings())
     try:
-        api_id = int(str(s.api_id))
-    except ValueError:
-        _die("API ID must be numeric.")
+        api_id = s.api_id_int()
+    except ValueError as exc:
+        _die(str(exc))
     client = tg_client.build_client(api_id, str(s.api_hash))
     try:
         await _login_cli(client)
@@ -346,9 +346,9 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
     if mode not in ("1", "2", "3"):
         _die("Mode must be 1, 2 or 3.")
     try:
-        api_id = int(str(s.api_id))
-    except ValueError:
-        _die("API ID must be numeric.")
+        api_id = s.api_id_int()
+    except ValueError as exc:
+        _die(str(exc))
     client = tg_client.build_client(api_id, str(s.api_hash))
     try:
         await _login_cli(client)
@@ -449,7 +449,7 @@ def cmd_config(args) -> int:
                     continue
                 setattr(s, k, v)
             else:
-                print(f"Unknown key {k!r} (api_id, download_dir, output_mode, theme).")
+                print(f"Unknown key {k!r} (valid: download_dir, output_mode, theme).")
         save_settings(s)
         print("Saved.")
         return 0
@@ -473,7 +473,7 @@ def cmd_config(args) -> int:
             if not st.api_id or not st.api_hash:
                 return False
             try:
-                c = tg_client.build_client(int(str(st.api_id)), str(st.api_hash))
+                c = tg_client.build_client(st.api_id_int(), str(st.api_hash))
             except (ValueError, TypeError):
                 return False
             try:
@@ -523,7 +523,7 @@ def cmd_config(args) -> int:
     if args.config_action == "login":
         async def _go():
             st = _ensure_api(load_settings())
-            c = tg_client.build_client(int(str(st.api_id)), str(st.api_hash))
+            c = tg_client.build_client(st.api_id_int(), str(st.api_hash))
             try:
                 await _login_cli(c)
             finally:
@@ -588,11 +588,11 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--dir", default="", help="Override download folder for this run.")
     d.add_argument("-y", "--yes", action="store_true", help="Skip confirm prompt.")
 
-    b = sub.add_parser("batch", help="Download every URL listed in a .txt file.")
-    b.add_argument("file", help="Text file with one URL per line.")
-    b.add_argument("--mode", default="")
-    b.add_argument("--dir", default="")
-    b.add_argument("-y", "--yes", action="store_true")
+    b = sub.add_parser("batch", help="Download every URL listed in a .txt file (max 256 KB, max 100 URLs).")
+    b.add_argument("file", help="Text file with one URL per line (max 256 KB).")
+    b.add_argument("--mode", default="", help="1=original, 2=fast, 3=max (default: settings).")
+    b.add_argument("--dir", default="", help="Override download folder for this run.")
+    b.add_argument("-y", "--yes", action="store_true", help="Skip confirm prompt.")
 
     pv = sub.add_parser("preview", help="Only fetch + show titles (no download).")
     pv.add_argument("urls", nargs="+")
@@ -603,10 +603,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("kv", nargs="*", help="key=value pairs for 'set'.")
 
     dp = sub.add_parser("deps", help="Check dependencies + per-OS install commands.")
-    dp.add_argument("--check", action="store_true")
 
     up = sub.add_parser("update", help="Check for a newer release on GitHub.")
-    up.add_argument("--check", action="store_true", help="Same as bare 'tg-dl update'.")
     return p
 
 
@@ -629,18 +627,38 @@ def main(argv=None) -> int:
         urls = split_urls(" ".join(args.urls)) or args.urls
         return asyncio.run(cmd_download(urls, args.mode, args.yes, args.dir))
     if args.cmd == "batch":
+        import os as _os
+        import stat as _stat
         try:
             p = Path(args.file)
-            # No symlink / fifo bomb: stat lies for fifos, read_text hangs.
+            # No symlink / fifo bomb, no TOCTOU: open O_NOFOLLOW|O_RDONLY
+            # first, then fstat the fd (a swapped-in link raises ELOOP and
+            # the type/size checks run on the opened file itself).
+            nofollow = getattr(_os, "O_NOFOLLOW", 0)
             try:
-                if p.is_symlink() or p.is_fifo() or not p.is_file():
-                    _die("Batch file must be a regular file.")
-                if p.stat().st_size > 256 * 1024:
-                    _die("Batch file too large (max 256 KB).")
-            except (OSError, ValueError) as exc:
+                fd = _os.open(p, _os.O_RDONLY | nofollow)
+            except OSError as exc:
+                import errno as _errno
+                if exc.errno == _errno.ELOOP:
+                    _die("Batch file must be a regular file (symlink refused).")
                 _die(f"Cannot read batch file: {exc}")
-            with open(p, "r", encoding="utf-8", errors="replace") as fh:
-                raw = fh.read(257 * 1024)
+            try:
+                st = _os.fstat(fd)
+                if not _stat.S_ISREG(st.st_mode):
+                    _die("Batch file must be a regular file.")
+                if st.st_size > MAX_BATCH_BYTES:
+                    _die("Batch file too large (max 256 KB).")
+                with _os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+                    fd = -1
+                    raw = fh.read(257 * 1024)
+            finally:
+                if fd != -1:
+                    try:
+                        _os.close(fd)
+                    except OSError:
+                        pass
+        except SystemExit:
+            raise
         except (OSError, ValueError) as exc:
             _die(f"Cannot read batch file: {exc}")
         urls = split_urls(raw)

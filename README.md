@@ -32,7 +32,7 @@
 
 Get the latest release for your platform from the
 [**Releases**](https://github.com/MDHasan0078/telegram-downloader/releases) page
-(`.deb` · `.apk` · macOS `.zip`), or build from source:
+(`.deb` · `.apk` · macOS `.dmg`), or build from source:
 
 ```bash
 git clone https://github.com/MDHasan0078/telegram-downloader
@@ -57,15 +57,16 @@ privately with `0600` permissions.
 
 ### GUI
 
-Three tabs, dark-first Material 3 design:
+Four destinations, dark-first Material 3 design:
 
 - **Add** — paste links (or load `.txt`), pick Original / Fast / Max, fetch titles,
-  tick or edit them, confirm and download.
-- **Queue** — live progress with speed/ETA, retry/remove per item, Resume all,
+  tick or edit them, confirm and download. Limits: max 100 URLs per run, batch
+  files max 256 KB.
+- **Queue** — live progress with speed/ETA, retry/remove per item, Resume all / Start,
   cancel batch (partials are kept).
-- **Settings** — connection (API ID/hash, folder, login/logout), download defaults,
-  appearance, About with update checker. **Dependencies** tab shows install status
-  with copy-paste commands.
+- **Settings** — Connection (API ID/hash, folder, login/logout), download defaults,
+  appearance, About with update checker.
+- **Deps** — dependency install status with copy-paste commands.
 
 Supported links:
 
@@ -82,10 +83,10 @@ https://t.me/c/1234567890/244/264
 tg-dl gui                                   # launch GUI
 tg-dl --version                             # installed version
 tg-dl update                                # check GitHub releases
-tg-dl preview <URL>...                      # fetch titles only
+tg-dl preview <URL>...                      # fetch titles only (max 100 URLs)
 tg-dl download <URL>...                     # fetch → confirm → download
 tg-dl download -y --mode 2 --dir ~/Videos <URL>...
-tg-dl batch urls.txt -y                     # one URL per line
+tg-dl batch urls.txt -y                     # one URL per line, file max 256 KB
 tg-dl config show | set | path | login | logout | reset
 tg-dl config set download_dir=/mnt/drive output_mode=2
 tg-dl deps                                  # dependency check
@@ -130,9 +131,9 @@ Version source of truth: `__version__` in
 | Symptom | Fix |
 |---|---|
 | `externally-managed-environment` | Use a venv (`python3 -m venv .venv`) or run `scripts/install-deps.sh` |
-| Phone invalid | Use full international format, e.g. `+8801XXXXXXXXX` |
+| Phone invalid | Use full international format, e.g. `+8801XXXXXXXXX` (typed blind — input is hidden, type carefully) |
 | Login every run | Finish one login; check `~/.config/telegram-downloader/session.session` exists; `tg-dl config logout` then log in again |
-| Transfer timeout / resume | Keep the partial file; rerun or Queue → Resume all (backoff + reconnect built in) |
+| Transfer timeout / resume | Keep the partial file; rerun or Queue → Resume all / Start (backoff + reconnect built in) |
 | ffmpeg missing | Mode 1 works without it; install via the Dependencies page or `scripts/install-deps.sh` |
 | Private channel / not found | The same account must be able to open the link in Telegram; check thread vs message id order |
 | GUI won't start | `pip install -e ".[gui]"`, then `tg-dl gui`; see `tg-dl deps` |

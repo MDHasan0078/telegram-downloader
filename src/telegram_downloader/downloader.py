@@ -12,11 +12,12 @@ from typing import Awaitable, Callable, Optional, Union
 from telethon import errors, utils
 from telethon.tl.types import Message
 
+from .constants import MAX_FILE_BYTES
+
 CHUNK_SIZE = 512 * 1024  # Telethon max for normal cloud files
 MAX_TRANSFER_RETRIES = 8
 RETRY_BASE_SECONDS = 3
 MAX_FLOODWAIT_SECONDS = 300  # longer server rate-limits fail fast instead of hanging
-MAX_FILE_BYTES = 8 * 1024 ** 3  # sanity cap; Telegram cloud files top out ~4 GiB
 MIN_FREE_BYTES = 100 * 1024 ** 2  # headroom kept on disk beyond the file itself
 
 ProgressCb = Union[Callable[[int, int], None], Callable[[int, int], Awaitable[None]]]
@@ -36,6 +37,23 @@ async def _emit(cb: Optional[ProgressCb], current: int, total: int) -> None:
     res = cb(current, total)
     if asyncio.iscoroutine(res):
         await res
+
+
+async def _retry_sleep(cancel: Optional[asyncio.Event], delay: float,
+                     destination: Path) -> None:
+    """Cancel-aware sleep shared by all transfer-retry paths.
+
+    Previously three near-identical blocks; a single helper keeps the
+    backoff and cancel semantics from diverging.
+    """
+    if cancel is not None:
+        try:
+            await asyncio.wait_for(cancel.wait(), timeout=delay)
+            raise Cancelled(f"Cancelled during retry wait; partial kept at {destination}.")
+        except asyncio.TimeoutError:
+            pass
+    else:
+        await asyncio.sleep(delay)
 
 
 async def download_resumable(client, message: Message, destination: Path,
@@ -78,16 +96,15 @@ async def download_resumable(client, message: Message, destination: Path,
 
     if _any_symlink_in_chain(destination) or _any_symlink_in_chain(destination.parent):
         raise DownloadError("Refusing to write through a symlink.")
-    # mkdir -p without following symlinks
+    # mkdir -p without following symlinks. No permissive fallback: if the
+    # safe mkdir refuses (symlink plant) or fails, abort rather than
+    # following the link with a plain mkdir.
     try:
         from .config import _mkdir_parents_nofollow
         _mkdir_parents_nofollow(destination.parent, mode=0o700)
-    except (RuntimeError, OSError):
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            destination.parent.chmod(0o700)
-        except OSError:
-            pass
+    except (RuntimeError, OSError) as exc:
+        raise DownloadError(
+            f"Refusing to create download folder (possible symlink plant): {exc}") from exc
     # Post-mkdir containment: a symlink parent created racily would cause
     # resolve() to escape; re-verify.
     try:
@@ -136,14 +153,16 @@ async def download_resumable(client, message: Message, destination: Path,
                 pass
         existing = 0
     if existing == total and existing > 0:
-        # Size match alone is not proof of integrity; still verify by
-        # checking that file is not empty and is readable. We still short-
-        # circuit but do not trust attacker-set size to skip download when
-        # file was pre-planted with exact size but wrong content. Best we
-        # can do without hash: ensure file stat matches total and not symlink.
-        if not destination.is_symlink() and destination.is_file():
-            await _emit(progress_cb, total, total)
-            return destination
+        # Size match alone is not proof of integrity: a planted file with
+        # the exact size would otherwise skip the download. Drop it and
+        # re-download from 0; the end-of-transfer size check still applies.
+        # (Callers skip already-done queue items, so this path only runs
+        # on explicit retries.)
+        try:
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+        except OSError:
+            pass
         existing = 0
     elif existing == total:
         # zero-byte file matches zero total should have been rejected earlier
@@ -260,14 +279,7 @@ async def download_resumable(client, message: Message, destination: Path,
                 await client.disconnect()
             except Exception:
                 pass
-            if cancel is not None:
-                try:
-                    await asyncio.wait_for(cancel.wait(), timeout=delay)
-                    raise Cancelled(f"Cancelled during retry wait; partial kept at {destination}.")
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(delay)
+            await _retry_sleep(cancel, delay, destination)
             try:
                 await client.connect()
             except Exception:
@@ -279,14 +291,7 @@ async def download_resumable(client, message: Message, destination: Path,
                     f"Telegram repeatedly failed the transfer at {current} bytes. "
                     f"Partial file kept at {destination}."
                 ) from exc
-            if cancel is not None:
-                try:
-                    await asyncio.wait_for(cancel.wait(), timeout=min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45))
-                    raise Cancelled(f"Cancelled during retry wait; partial kept at {destination}.")
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45))
+            await _retry_sleep(cancel, min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45), destination)
         except errors.RPCError as exc:
             # Transient RPC errors (FileReferenceExpiredError, etc.) are
             # retried like other network failures; non-retryable ones
@@ -298,14 +303,7 @@ async def download_resumable(client, message: Message, destination: Path,
                     f"Telegram RPC error after {MAX_TRANSFER_RETRIES} retries at "
                     f"{current}/{total} bytes: {exc}. Partial kept at {destination}."
                 ) from exc
-            if cancel is not None:
-                try:
-                    await asyncio.wait_for(cancel.wait(), timeout=min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45))
-                    raise Cancelled(f"Cancelled during retry wait; partial kept at {destination}.")
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45))
+            await _retry_sleep(cancel, min(RETRY_BASE_SECONDS * (2 ** (attempt - 1)), 45), destination)
 
     if not destination.exists() or destination.stat().st_size != total:
         got = destination.stat().st_size if destination.exists() else 0

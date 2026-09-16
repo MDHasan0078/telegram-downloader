@@ -56,12 +56,13 @@ def check_all() -> list[DepStatus]:
     ))
 
     # ffmpeg (only needed for modes 2/3; mode 1 works without it)
-    ff_ok = shutil.which("ffmpeg") is not None
+    ff_exe = shutil.which("ffmpeg")
+    ff_ok = ff_exe is not None
     ff_ver = ""
     if ff_ok:
         try:
             import subprocess
-            r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
+            r = subprocess.run([ff_exe, "-version"], capture_output=True, text=True, timeout=10)
             ff_ver = (r.stdout.splitlines() or [""])[0].replace("ffmpeg version", "").strip()[:40]
         except Exception:
             pass

@@ -8,6 +8,8 @@ Release-asset naming convention (see scripts/build-*.sh + CI):
     telegram-downloader_<ver>_amd64.deb   Linux
     telegram-downloader_<ver>.dmg         macOS
     telegram-downloader_<ver>.apk         Android
+Each platform job also publishes SHA256SUMS-<plat> (deb/apk/dmg), which
+download_asset() verifies before returning the installer path.
 """
 from __future__ import annotations
 
@@ -68,9 +70,7 @@ class UpdateInfo:
             operating_system = platform.system().lower()
             if operating_system == "linux" and "com.termux" in __import__("os").environ.get("PREFIX", ""):
                 operating_system = "android"
-        if operating_system == "windows":
-            versioned = {f"telegram-downloader_{self.latest_version}_win64.exe"}
-        elif operating_system in ("darwin", "macos"):
+        if operating_system in ("darwin", "macos"):
             versioned = {f"telegram-downloader_{self.latest_version}.dmg"}
         elif operating_system == "linux":
             versioned = {f"telegram-downloader_{self.latest_version}_amd64.deb"}
@@ -117,8 +117,20 @@ _RELEASE_URL_RE = re.compile(
     rf"^https://github\.com/{re.escape(REPO)}/releases/tag/v?\d+\.\d+\.\d+\Z")
 # Version-bound, case-sensitive, no traversal: only our exact release
 # filenames are ever downloaded. \Z blocks trailing newline bypass.
+# (No .exe: there is no Windows build job.)
 _ASSET_NAME_RE = re.compile(
-    r"^telegram-downloader_\d+\.\d+\.\d+(_amd64|_win64)?\.(deb|dmg|apk|exe)\Z")
+    r"^telegram-downloader_\d+\.\d+\.\d+(_amd64)?\.(deb|dmg|apk)\Z")
+
+# Per-platform checksum files published alongside the installers.
+# Exact names only — never fetched from an untrusted listing.
+_CHECKSUM_NAMES = {
+    "linux": "SHA256SUMS-deb",
+    "android": "SHA256SUMS-apk",
+    "darwin": "SHA256SUMS-dmg",
+    "macos": "SHA256SUMS-dmg",
+}
+_CHECKSUM_NAME_RE = re.compile(r"^SHA256SUMS-(deb|apk|dmg)\Z")
+MAX_CHECKSUM_BYTES = 64 * 1024
 
 
 def check_for_update(repo: str = REPO, timeout: int = 10) -> UpdateInfo | None:
@@ -172,7 +184,6 @@ def check_for_update(repo: str = REPO, timeout: int = 10) -> UpdateInfo | None:
             f"telegram-downloader_{tag_ver}_amd64.deb",
             f"telegram-downloader_{tag_ver}.dmg",
             f"telegram-downloader_{tag_ver}.apk",
-            f"telegram-downloader_{tag_ver}_win64.exe",
         }
         assets = [a for a in assets if a.name in expected]
         return UpdateInfo(latest_version=tag.lstrip("v").lstrip("V"),
@@ -182,15 +193,95 @@ def check_for_update(repo: str = REPO, timeout: int = 10) -> UpdateInfo | None:
         return None
 
 
+def _checksum_name_for(asset_name: str) -> str | None:
+    if asset_name.endswith(".deb"):
+        return "SHA256SUMS-deb"
+    if asset_name.endswith(".apk"):
+        return "SHA256SUMS-apk"
+    if asset_name.endswith(".dmg"):
+        return "SHA256SUMS-dmg"
+    return None
+
+
+def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30) -> dict[str, str]:
+    """Download SHA256SUMS-<plat> for a release tag. Returns {filename: hexdigest}.
+
+    Fail-closed: any problem raises — a compromised/mirrored release must
+    never silently skip verification.
+    """
+    if not _CHECKSUM_NAME_RE.match(checksum_name or ""):
+        raise ValueError(f"Refusing unexpected checksum name: {checksum_name!r}")
+    if not _VERSION_RE.match(f"v{tag_version}"):
+        raise ValueError(f"Refusing unexpected tag version: {tag_version!r}")
+    url = (f"https://github.com/{REPO}/releases/download/"
+           f"v{tag_version}/{checksum_name}")
+    if not _https_url_ok(url, ASSET_HOSTS):
+        raise ValueError(f"Refusing to fetch checksum from untrusted URL: {url!r}")
+    req = urllib.request.Request(url, headers={"User-Agent": "telegram-downloader"})
+    with _urlopen_no_redirect(req, timeout=timeout) as resp:
+        if resp.status != 200:
+            raise ValueError(f"Checksum file unavailable (HTTP {resp.status}); refusing unverified installer.")
+        declared = resp.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                if int(declared) > MAX_CHECKSUM_BYTES:
+                    raise ValueError("Checksum file too large; refusing.")
+            except ValueError:
+                raise
+            except (TypeError, AttributeError) as exc:
+                raise ValueError(f"Bad checksum Content-Length: {declared!r}") from exc
+        body = resp.read(MAX_CHECKSUM_BYTES + 1)
+    if len(body) > MAX_CHECKSUM_BYTES:
+        raise ValueError("Checksum file too large; refusing.")
+    out: dict[str, str] = {}
+    for line in body.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        digest, fname = parts
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            continue
+        fname = fname.lstrip("*")
+        if _ASSET_NAME_RE.match(fname):
+            out[fname] = digest.lower()
+    if not out:
+        raise ValueError("Checksum file has no usable entries; refusing unverified installer.")
+    return out
+
+
+def _verify_file_sha256(path, digest: str) -> None:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 256)
+            if not chunk:
+                break
+            h.update(chunk)
+    import hmac as _hmac
+    if not _hmac.compare_digest(h.hexdigest(), digest.lower()):
+        raise ValueError("SHA256 mismatch — installer may be tampered; refusing.")
+
+
 def open_release_page(url: str) -> None:
     if not _https_url_ok(url, RELEASE_HOSTS) or not _RELEASE_URL_RE.match(url):
         raise ValueError(f"Refusing to open untrusted URL: {url!r}")
+    # Resolve openers to absolute paths: a hostile $PATH must not swap
+    # the browser launcher between check and exec.
+    import shutil as _shutil
     if sys.platform.startswith("linux"):
-        subprocess.Popen(["xdg-open", url],
+        exe = _shutil.which("xdg-open")
+        if not exe:
+            raise ValueError("xdg-open not found; open the URL manually.")
+        subprocess.Popen([exe, url],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     elif sys.platform == "darwin":
-        subprocess.Popen(["open", url],
+        exe = _shutil.which("open") or "/usr/bin/open"
+        subprocess.Popen([exe, url],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     elif sys.platform == "win32":
@@ -202,12 +293,13 @@ def open_release_page(url: str) -> None:
         print(url)
 
 
-def download_asset(asset: UpdateAsset, dest_dir) -> object:
+def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None) -> object:
     """Download an installer asset into *dest_dir*. Returns the final path.
 
     Hardened: https + asset-host allowlist, no-redirect fetch, strict
-    release filename, sanitized name, size cap, symlink-safe atomic write.
-    Never executes the result.
+    release filename, sanitized name, size cap, symlink-safe atomic write,
+    SHA256 verification against the release's SHA256SUMS-<plat> file when
+    *tag_version* is given (fail-closed). Never executes the result.
     """
     import os as _os
     import secrets as _secrets
@@ -283,6 +375,30 @@ def download_asset(asset: UpdateAsset, dest_dir) -> object:
             pass
         raise
     _harden(tmp)
+    if tag_version:
+        checksum_name = _checksum_name_for(name)
+        if checksum_name is None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ValueError(f"No checksum file defined for asset: {name!r}")
+        sums = _fetch_checksum(checksum_name, tag_version)
+        digest = sums.get(name)
+        if digest is None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ValueError(f"Asset {name!r} missing from {checksum_name}; refusing unverified installer.")
+        try:
+            _verify_file_sha256(tmp, digest)
+        except ValueError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     tmp.replace(dest)
     try:
         dest.chmod(0o600 & ~0o111)

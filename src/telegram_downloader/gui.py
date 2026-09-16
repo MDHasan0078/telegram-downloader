@@ -26,6 +26,7 @@ from .config import (_sanitize_display, Settings, clear_session,
                      harden_session_files, load_settings,
                      save_settings)
 from .converter import ffmpeg_to_mp4
+from .constants import MAX_BATCH_BYTES, MAX_URLS
 from .downloader import Cancelled, download_resumable
 from .queue_store import DownloadItem, QueueStore
 from .telegram_utils import format_bytes, safe_filename, split_urls
@@ -65,7 +66,7 @@ def run_gui(port=None):
                 except Exception:
                     pass
                 state["client"] = None
-            state["client"] = tg_client.build_client(int(str(st.api_id)), str(st.api_hash))
+            state["client"] = tg_client.build_client(st.api_id_int(), str(st.api_hash))
             state["client_fp"] = fingerprint
             state.pop("me_id", None)
         c = state["client"]
@@ -316,12 +317,12 @@ def run_gui(port=None):
             st = await ensure_api_or_goto_settings()
             if not st:
                 return
-            urls = split_urls(url_box.value or "", limit=100)
+            urls = split_urls(url_box.value or "")
             if not urls:
                 snack(page, "Paste at least one t.me link first.", error=True)
                 return
-            if len(urls) >= 100:
-                snack(page, "Capped at 100 URLs; extra links ignored.")
+            if len(urls) >= MAX_URLS:
+                snack(page, f"Capped at {MAX_URLS} URLs; extra links ignored.")
             state["fetching"] = True
             bar.visible = True
             status_txt.value = f"Fetching {len(urls)} title(s)..."
@@ -453,7 +454,7 @@ def run_gui(port=None):
                         if fpath.is_symlink() or getattr(fpath, "is_fifo", lambda: False)() or not fpath.is_file():
                             snack(page, "File must be a regular file.", error=True)
                             return
-                        if fpath.stat().st_size > 256 * 1024:
+                        if fpath.stat().st_size > MAX_BATCH_BYTES:
                             snack(page, "File too large (max 256 KB).", error=True)
                             return
                     except OSError as exc:
@@ -465,7 +466,7 @@ def run_gui(port=None):
                     except OSError as exc:
                         snack(page, f"Cannot read file: {exc}", error=True)
                         return
-                    urls = split_urls(txt, limit=100)
+                    urls = split_urls(txt)
                     url_box.value = "\n".join(urls)
                     snack(page, f"Loaded {len(urls)} URL(s) from file.")
                 page.update()
@@ -494,6 +495,8 @@ def run_gui(port=None):
             section("Add Download", [
                 url_box,
                 ft.Row([ft.Text("Mode:", size=14), mode_seg], spacing=16),
+                ft.Text("Fast / Max need ffmpeg — Original works without it.",
+                        size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Row([fetch_btn,
                         ft.OutlinedButton("Load .txt", icon=ft.Icons.FILE_OPEN,
                                           on_click=on_load_file),
@@ -543,10 +546,16 @@ def run_gui(port=None):
         try:
             # No `--`: macOS open(1) and old xdg-open don't support bare
             # `--`, and is_absolute() already kills option-injection.
+            # Resolved to absolute paths: hostile $PATH must not swap them.
+            import shutil as _shutil
             if sys.platform.startswith("linux"):
-                subprocess.Popen(["xdg-open", str(p)])
+                exe = _shutil.which("xdg-open")
+                if not exe:
+                    snack(page, "Cannot open folder: xdg-open not found.", error=True)
+                    return
+                subprocess.Popen([exe, str(p)])
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(p)])
+                subprocess.Popen([_shutil.which("open") or "/usr/bin/open", str(p)])
             elif sys.platform == "win32":
                 # explorer parses `,` `/select,` internally; reject odd chars
                 # earlier in ensure_download_dir, keep list-form here.
@@ -562,7 +571,7 @@ def run_gui(port=None):
             return
         pend = [i for i in store.items if i.status == "queued"]
         if not pend:
-            snack(page, "Queue is empty (or all done). Use Resume to retry errors.")
+            snack(page, "Queue is empty (or all done). Use Resume all / Start to retry errors.")
             return
         state["downloading"] = True
         state["cancel"] = asyncio.Event()
@@ -920,7 +929,7 @@ def run_gui(port=None):
                     try:
                         st0 = load_settings()
                         if st0.api_id and st0.api_hash:
-                            tmp = tg_client.build_client(int(str(st0.api_id)), str(st0.api_hash))
+                            tmp = tg_client.build_client(st0.api_id_int(), str(st0.api_hash))
                             try:
                                 await tmp.connect()
                                 try:
@@ -998,7 +1007,8 @@ def run_gui(port=None):
             snack(page, f"Downloading {asset.name}...")
             try:
                 dest = await asyncio.to_thread(
-                    updates.download_asset, asset, ensure_download_dir(load_settings()))
+                    updates.download_asset, asset,
+                    ensure_download_dir(load_settings()), info.latest_version)
                 snack(page, f"Saved installer to {dest}. Install it manually to upgrade.")
             except Exception as exc:
                 snack(page, f"Download failed: {exc}", error=True)
@@ -1391,7 +1401,7 @@ def run_gui(port=None):
         nav["goto"] = _goto
         # First-run nudge: open Settings when API/folder missing.
         st0 = load_settings()
-        start_idx = 2 if (not st0.api_id or not st0.api_hash) else 0
+        start_idx = 2 if (not st0.api_id or not st0.api_hash or not st0.download_dir) else 0
         rail.selected_index = start_idx
         body.content = views[start_idx]
         page.add(ft.Row([rail, ft.VerticalDivider(width=1), body], expand=True))
