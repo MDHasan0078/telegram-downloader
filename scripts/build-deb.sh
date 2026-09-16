@@ -22,6 +22,9 @@ Description: Telegram media downloader (GUI + CLI)
 EOF
 
 cp -r src pyproject.toml README.md "$PKG/opt/telegram-downloader/"
+# Prebuild a wheel: installing from source at runtime fails for non-root
+# users (setuptools cannot write egg-info into root-owned /opt).
+pip wheel --no-deps -w "$PKG/opt/telegram-downloader/wheels" . 2>&1 | tail -2
 cat > "$PKG/opt/telegram-downloader/run.sh" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -36,7 +39,9 @@ else
   VENV="$USER_VENV"
 fi
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
-"$VENV/bin/pip" install -q -U "$APP" "$APP[gui,speed]" || "$VENV/bin/pip" install -q -U "$APP"
+# Install from the prebuilt wheel (never touches the root-owned source tree).
+WHEEL=( "$APP"/wheels/*.whl )
+"$VENV/bin/pip" install -q -U "${WHEEL[0]}[gui,speed]" || "$VENV/bin/pip" install -q -U "${WHEEL[0]}"
 exec "$VENV/bin/tg-dl" "$@"
 EOF
 chmod +x "$PKG/opt/telegram-downloader/run.sh"
@@ -51,6 +56,7 @@ Type=Application
 Categories=AudioVideo;Network;
 EOF
 [ -f assets/icon.svg ] && cp assets/icon.svg "$PKG/usr/share/icons/hicolor/scalable/apps/telegram-downloader.svg" || true
+chmod 0755 "$PKG/DEBIAN"
 mkdir -p dist
 dpkg-deb --build "$PKG" "dist/telegram-downloader_${VER}_amd64.deb"
 echo "Built dist/telegram-downloader_${VER}_amd64.deb"
