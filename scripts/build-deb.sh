@@ -6,7 +6,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # tomllib needs py3.11+; parse with regex so py3.9/3.10 don't silently
 # fall back to a wrong 0.1.0 version (fail loudly instead).
-VER="$(python3 -c 'import re,sys; m=re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M); sys.exit(0 if m else 1); print(m.group(1))')"
+# NOTE: print() MUST come before sys.exit() — sys.exit raises SystemExit
+# immediately, so any print after it is dead code (VER would be empty).
+VER="$(python3 -c '
+import re, sys
+m = re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M)
+if not m:
+    sys.stderr.write("build-deb.sh: cannot find version in pyproject.toml\n")
+    sys.exit(1)
+print(m.group(1))
+')"
 PKG="dist/debroot"
 rm -rf dist "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/opt/telegram-downloader" "$PKG/usr/bin" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps"

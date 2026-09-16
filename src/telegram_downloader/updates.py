@@ -96,17 +96,48 @@ def _https_url_ok(url: str, hosts: set[str]) -> bool:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse automatic redirects so the allowlist can't be bypassed by a
-    302 from an allowlisted host to an attacker URL (SSRF/downgrade)."""
+    """Follow redirects ONLY to allowlisted hosts; refuse everything else so
+    the allowlist can't be bypassed by a 302 from an allowlisted host to an
+    attacker URL (SSRF/downgrade). GitHub release downloads always redirect
+    `github.com/.../releases/download/...` -> release-assets.githubusercontent.com,
+    so blanket-blocking 302s was breaking the in-app updater.
+
+    Auth: if the redirect stays on the same host the Authorization header is
+    kept; on a cross-host (allowlisted) redirect the token is dropped so it
+    never leaks to a third-party CDN.
+    """
+
+    def __init__(self, allowed_hosts: set[str] | None = None):
+        super().__init__()
+        self._allowed = allowed_hosts or ASSET_HOSTS
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+        try:
+            parts = urllib.parse.urlparse(newurl)
+        except Exception:
+            return None
+        if (parts.scheme not in ("https",) or parts.hostname not in self._allowed
+                or parts.username or parts.password
+                or parts.port not in (None, 443)):
+            return None
+        keep_auth = (req.host == parts.hostname)
+        hdrs = {k: v for k, v in req.headers.items() if k.lower() not in ("authorization",)}
+        if keep_auth and "Authorization" in req.headers:
+            hdrs["Authorization"] = req.headers["Authorization"]
+        return urllib.request.Request(newurl, headers=hdrs,
+                                      data=req.data, method=req.get_method())
 
 
-def _urlopen_no_redirect(req: urllib.request.Request, timeout: int):
+def _urlopen_no_redirect(req: urllib.request.Request, timeout: int,
+                         token: str | None = None):
     # Disable env proxies (HTTPS_PROXY gag) — otherwise local attacker can
     # MITM update checks via env var. Explicit empty ProxyHandler.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    headers = dict(req.headers)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(req.full_url, headers=headers,
+                                 data=req.data, method=req.get_method())
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     return opener.open(req, timeout=timeout)
 
 
@@ -133,19 +164,26 @@ _CHECKSUM_NAME_RE = re.compile(r"^SHA256SUMS-(deb|apk|dmg)\Z")
 MAX_CHECKSUM_BYTES = 64 * 1024
 
 
-def check_for_update(repo: str = REPO, timeout: int = 10) -> UpdateInfo | None:
+def check_for_update(repo: str = REPO, timeout: int = 10,
+                     token: str | None = None) -> UpdateInfo | None:
     """Return UpdateInfo or None (offline / no releases / rate-limited). Never raises."""
     if repo != REPO:
-        # The updater UI presents results as trusted: never allow callers to
-        # point it at an arbitrary repo (attacker release = trusted prompt).
         return None
+    if token is None:
+        token = __import__("os").environ.get("GITHUB_TOKEN") or ""
     try:
+        headers: dict[str, str] = {
+            "User-Agent": "telegram-downloader",
+            "Accept": "application/vnd.github+json",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(
             f"https://api.github.com/repos/{repo}/releases/latest",
-            headers={"User-Agent": "telegram-downloader",
-                     "Accept": "application/vnd.github+json"},
+            headers=headers,
         )
-        with _urlopen_no_redirect(req, timeout=timeout) as resp:
+        with _urlopen_no_redirect(req, timeout=timeout,
+                                   token=token or None) as resp:
             if resp.status != 200:
                 return None
             data = json.loads(resp.read().decode("utf-8"))
@@ -203,7 +241,8 @@ def _checksum_name_for(asset_name: str) -> str | None:
     return None
 
 
-def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30) -> dict[str, str]:
+def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30,
+                    token: str | None = None) -> dict[str, str]:
     """Download SHA256SUMS-<plat> for a release tag. Returns {filename: hexdigest}.
 
     Fail-closed: any problem raises — a compromised/mirrored release must
@@ -217,8 +256,11 @@ def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30) -> 
            f"v{tag_version}/{checksum_name}")
     if not _https_url_ok(url, ASSET_HOSTS):
         raise ValueError(f"Refusing to fetch checksum from untrusted URL: {url!r}")
-    req = urllib.request.Request(url, headers={"User-Agent": "telegram-downloader"})
-    with _urlopen_no_redirect(req, timeout=timeout) as resp:
+    headers = {"User-Agent": "telegram-downloader"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    with _urlopen_no_redirect(req, timeout=timeout, token=token or None) as resp:
         if resp.status != 200:
             raise ValueError(f"Checksum file unavailable (HTTP {resp.status}); refusing unverified installer.")
         declared = resp.headers.get("Content-Length")
@@ -293,7 +335,8 @@ def open_release_page(url: str) -> None:
         print(url)
 
 
-def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None) -> object:
+def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
+                   token: str | None = None) -> object:
     """Download an installer asset into *dest_dir*. Returns the final path.
 
     Hardened: https + asset-host allowlist, no-redirect fetch, strict
@@ -306,6 +349,8 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None)
     from pathlib import Path
     from .config import harden_private_file as _harden
     from .telegram_utils import safe_filename
+    if token is None:
+        token = __import__("os").environ.get("GITHUB_TOKEN") or ""
     if not _https_url_ok(asset.url, ASSET_HOSTS):
         raise ValueError(f"Refusing to download from untrusted URL: {asset.url!r}")
     if not _ASSET_NAME_RE.match(asset.name or ""):
@@ -330,11 +375,12 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None)
             raise ValueError("Refusing to write through symlink tmp file.")
     except OSError:
         pass
-    req = urllib.request.Request(asset.url, headers={"User-Agent": "telegram-downloader"})
+    req = urllib.request.Request(asset.url, headers={"User-Agent": "telegram-downloader",
+                                                        "Authorization": f"Bearer {token}" if token else "telegram-downloader"})
     total = 0
     fd = _os.open(tmp, _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | nofollow, 0o600)
     try:
-        with _urlopen_no_redirect(req, timeout=60) as resp:
+        with _urlopen_no_redirect(req, timeout=60, token=token or None) as resp:
             declared = resp.headers.get("Content-Length")
             if declared is not None:
                 try:
@@ -383,7 +429,7 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None)
             except OSError:
                 pass
             raise ValueError(f"No checksum file defined for asset: {name!r}")
-        sums = _fetch_checksum(checksum_name, tag_version)
+        sums = _fetch_checksum(checksum_name, tag_version, token=token)
         digest = sums.get(name)
         if digest is None:
             try:

@@ -43,10 +43,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "${{ github.ref_name }}"
           files: |
             dist/*.deb
             dist/SHA256SUMS-deb
-          overwrite_files: true
+          overwrite: true
 
   apk:
     needs: test
@@ -88,10 +89,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "${{ github.ref_name }}"
           files: |
             build/apk/*.apk
             build/apk/SHA256SUMS-apk
-          overwrite_files: true
+          overwrite: true
 
   dmg:
     needs: test
@@ -129,7 +131,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "${{ github.ref_name }}"
           files: |
             dist/*.dmg
             dist/SHA256SUMS-dmg
-          overwrite_files: true
+          overwrite: true

@@ -1006,9 +1006,12 @@ def run_gui(port=None):
                 return
             snack(page, f"Downloading {asset.name}...")
             try:
+                import os as _os
+                token = _os.environ.get("GITHUB_TOKEN") or ""
                 dest = await asyncio.to_thread(
                     updates.download_asset, asset,
-                    ensure_download_dir(load_settings()), info.latest_version)
+                    ensure_download_dir(load_settings()), info.latest_version,
+                    token or None)
                 snack(page, f"Saved installer to {dest}. Install it manually to upgrade.")
             except Exception as exc:
                 snack(page, f"Download failed: {exc}", error=True)

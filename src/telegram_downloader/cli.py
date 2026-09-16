@@ -543,8 +543,10 @@ def _app_version() -> str:
 
 def cmd_update(args) -> int:
     from . import updates
+    import os as _os
+    token = _os.environ.get("GITHUB_TOKEN") or ""
     print(f"Current version: v{_app_version()}  (checking {updates.REPO}...)")
-    info = updates.check_for_update()
+    info = updates.check_for_update(token=token or None)
     if info is None:
         print("Could not reach the update server (offline or no releases yet).")
         return 1

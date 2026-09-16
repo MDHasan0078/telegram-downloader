@@ -95,7 +95,7 @@ def test_fetch_checksum_parses(monkeypatch):
             return False
 
     seen = {}
-    def fake_open(req, timeout=0):
+    def fake_open(req, timeout=0, token=None):
         seen["url"] = req.full_url
         return FakeResp()
     monkeypatch.setattr(upd, "_urlopen_no_redirect", fake_open)
