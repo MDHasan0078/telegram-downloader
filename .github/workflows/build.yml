@@ -52,6 +52,8 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "17" }
       - run: pip install "flet[all]==0.86.5" && flet doctor || true
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh --debug
       - uses: actions/upload-artifact@v4
         with: { name: apk, path: build/apk/*.apk }
