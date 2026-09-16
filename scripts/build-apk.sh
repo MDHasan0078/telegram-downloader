@@ -6,9 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 pip install -U "flet[all]==0.86.5" 2>&1 | tail -2
 if [ "${1:-}" = "--debug" ]; then
-  flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args=--debug
+  flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args=--debug --yes
 else
-  flet build apk --project telegram_downloader.gui --module-name main
+  flet build apk --project telegram_downloader.gui --module-name main --yes
 fi
 echo "APK should be under build/apk/. Copy to phone and install."
 echo "Note: first build downloads Flutter + Android SDK (large, one-time)."
