@@ -40,7 +40,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.deb
-          overwrite: true
+          overwrite_files: true
 
   apk:
     needs: test
@@ -51,7 +51,7 @@ jobs:
         with: { python-version: "3.12" }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "17" }
-      - run: pip install "flet[all]" && flet doctor || true
+      - run: pip install "flet[all]==0.86.5" && flet doctor || true
       - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh --debug
       - uses: actions/upload-artifact@v4
         with: { name: apk, path: build/apk/*.apk }
@@ -60,7 +60,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/apk/*.apk
-          overwrite: true
+          overwrite_files: true
 
   dmg:
     needs: test
@@ -69,6 +69,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install "flet[all]" && chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
+      - run: pip install "flet[all]==0.86.5" && chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
       - uses: actions/upload-artifact@v4
         with: { name: macos, path: build/macos/ }

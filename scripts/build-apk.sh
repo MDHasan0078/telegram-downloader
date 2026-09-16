@@ -4,9 +4,9 @@
 # Usage: ./scripts/build-apk.sh [--debug]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-pip install -U "flet[all]" 2>&1 | tail -2
+pip install -U "flet[all]==0.86.5" 2>&1 | tail -2
 if [ "${1:-}" = "--debug" ]; then
-  flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args --debug
+  flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args=--debug
 else
   flet build apk --project telegram_downloader.gui --module-name main
 fi
