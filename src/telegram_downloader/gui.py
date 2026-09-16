@@ -1397,4 +1397,7 @@ def run_gui(port=None):
         page.add(ft.Row([rail, ft.VerticalDivider(width=1), body], expand=True))
 
     import flet as ft
-    ft.app(target=_main, port=port)
+    if port:
+        ft.app(target=_main, port=port)
+    else:
+        ft.app(target=_main)
