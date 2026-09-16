@@ -328,12 +328,24 @@ def _read_legacy() -> dict:
     values: dict = {}
     try:
         # lstat first: never read through a planted symlink (its KEY=VALUE
-        # lines would be migrated into the real config).
+        # lines would be migrated into the real config). Close the
+        # check-then-read window with an O_NOFOLLOW open just like the
+        # queue loader — is_symlink() alone is TOCTOU-racy.
         if LEGACY_CONFIG.is_symlink():
             return values
         if not LEGACY_CONFIG.exists() or CONFIG_JSON.exists():
             return values
-        for raw in LEGACY_CONFIG.read_text(encoding="utf-8").splitlines():
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(LEGACY_CONFIG, os.O_RDONLY | nofollow)
+        except OSError as exc:
+            import errno as _errno
+            if exc.errno == _errno.ELOOP:
+                return values
+            return values
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            raw_text = fh.read(512 * 1024)
+        for raw in raw_text.splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -554,14 +566,11 @@ def ensure_download_dir(s: Settings) -> Path:
     try:
         _mkdir_parents_nofollow(target, mode=0o700)
     except (RuntimeError, OSError) as exc:
-        # _mkdir already validates symlink; re-raise as ValueError for callers
-        if isinstance(exc, RuntimeError):
-            raise ValueError(str(exc)) from exc
-        target.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            target.chmod(0o700)
-        except OSError:
-            pass
+        # No permissive mkdir(parents=True) fallback: it would follow a
+        # planted symlink in an ancestor. ANY failure here is a refusal —
+        # callers get a clear ValueError instead of a security bypass.
+        raise ValueError(
+            f"Refusing to create download folder {target}: {exc}") from exc
     # Post-mkdir re-check: a race that swapped a parent to a link is caught.
     try:
         cur = target.resolve()

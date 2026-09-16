@@ -3,8 +3,19 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Optional, Tuple
+
+
+def _sleep(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        threading.Event().wait(remaining)
 
 
 def _bin(name: str) -> Optional[str]:
@@ -73,11 +84,16 @@ def ffprobe_has_video(path: Path) -> bool:
         return False
 
 
-def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2") -> None:
+def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
+                  cancel: Optional[threading.Event] = None) -> None:
     """Create MP4 (remux when H.264/AAC-compatible, else re-encode).
 
     Writes only to *output_path*; callers should pass a `.part.mp4` temp
     name and atomically rename after success (see cli/gui).
+
+    If *cancel* is supplied, ffmpeg runs under a Popen poll loop; setting
+    the event kills the process (child-friendly SIGTERM, then SIGKILL) and
+    raises RuntimeError("...cancelled...").
     """
     if not has_ffmpeg():
         raise RuntimeError("ffmpeg is required for MP4 output but was not found.")
@@ -104,7 +120,33 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2") -> None:
                "-c:a", "aac", "-b:a", "128k",
                "-movflags", "+faststart", "--", str(output_path)]
     try:
-        subprocess.run(cmd, check=True, timeout=3600)
+        if cancel is not None:
+            proc = subprocess.Popen(cmd)
+            while proc.poll() is None:
+                if cancel.is_set():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    try:
+                        output_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        f"Conversion cancelled; source kept at {input_path}")
+                _sleep(0.2)
+            if proc.returncode != 0:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"FFmpeg processing failed; source kept at {input_path} "
+                    f"(exit {proc.returncode})")
+        else:
+            subprocess.run(cmd, check=True, timeout=3600)
     except subprocess.TimeoutExpired as exc:
         try:
             output_path.unlink(missing_ok=True)

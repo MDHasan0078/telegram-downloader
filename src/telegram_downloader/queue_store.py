@@ -20,6 +20,11 @@ MAX_QUEUE_ITEMS = 1000
 MAX_QUEUE_BYTES = 5 * 1024 * 1024
 MAX_STR_FIELD = 500
 MAX_NUM_FIELD = MAX_FILE_BYTES
+_MODES = ("1", "2", "3")
+# Never reflect dunder keys: a crafted queue.json with "__class__" (or
+# __dict__/__globals__) previously hit `setattr` and crashed the app on
+# startup with an unhandled TypeError (DoS). Block them at every entry.
+_FORBIDDEN_KEYS = frozenset(k for k in dir(object))
 _EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,10}")
 
 
@@ -57,6 +62,8 @@ def _sanitize_item(it: "DownloadItem") -> "DownloadItem":
     it.progress = _sanitize_num(it.progress, is_float=True)
     if it.status not in STATUSES:
         it.status = "queued"
+    if it.mode not in _MODES:
+        it.mode = "1"
     if not isinstance(it.id, str) or not it.id or len(it.id) > 64:
         it.id = uuid.uuid4().hex[:12]
     return it
@@ -68,6 +75,7 @@ class DownloadItem:
     url: str = ""
     title: str = ""          # final stem without extension (editable)
     ext: str = ".mp4"
+    mode: str = "1"          # 1=original, 2=fast, 3=max (per-item intent)
     size: int = 0
     status: str = "queued"
     progress: float = 0.0       # 0..100
@@ -86,6 +94,8 @@ class DownloadItem:
         if not isinstance(d, dict):
             return it
         for k, v in d.items():
+            if k in _FORBIDDEN_KEYS or k.startswith("__"):
+                continue  # dunder/object attrs can never be set (DoS guard)
             if k == "status" and v not in STATUSES:
                 continue  # corrupt status: leave as default "queued"
             if k == "id" and (not isinstance(v, str) or len(v) > 64):
@@ -93,6 +103,8 @@ class DownloadItem:
             if k == "ext" and isinstance(v, str):
                 if v and not _EXT_RE.fullmatch(v):
                     continue
+            if k == "mode" and v not in _MODES:
+                continue
             if hasattr(it, k) and isinstance(v, (str, int, float)) and not isinstance(v, bool):
                 setattr(it, k, v)
         return _sanitize_item(it)
@@ -208,13 +220,20 @@ class QueueStore:
         self._emit()
         return item
 
-    def extend(self, items: list[DownloadItem]) -> None:
-        """Add many items with a single save (avoids O(n²) I/O on batches)."""
+    def extend(self, items: list[DownloadItem]) -> list[DownloadItem]:
+        """Add many items with a single save (avoids O(n²) I/O on batches).
+
+        Returns exactly the items actually added, so callers can address
+        them by id without guessing from queue length (queue may silently
+        truncate when near MAX_QUEUE_ITEMS).
+        """
         room = MAX_QUEUE_ITEMS - len(self.items)
         if room <= 0:
-            return
-        self.items.extend(_sanitize_item(it) for it in items[:room])
+            return []
+        added = [_sanitize_item(it) for it in items[:room]]
+        self.items.extend(added)
         self._emit()
+        return added
 
     def get(self, item_id: str) -> Optional[DownloadItem]:
         for it in self.items:
@@ -227,6 +246,8 @@ class QueueStore:
         if not it:
             return
         for k, v in kw.items():
+            if k in _FORBIDDEN_KEYS or k.startswith("__"):
+                continue  # dunder/object attrs can never be set (DoS guard)
             if not hasattr(it, k):
                 continue
             # Skip (don't coerce) invalid enum values so callers can't
@@ -237,6 +258,8 @@ class QueueStore:
                 if v and not _EXT_RE.fullmatch(v):
                     continue
             if k == "status" and v not in STATUSES:
+                continue
+            if k == "mode" and v not in _MODES:
                 continue
             if k == "id" and (not isinstance(v, str) or len(v) > 64):
                 continue
@@ -263,6 +286,10 @@ class QueueStore:
 
     def clear_finished(self) -> None:
         self.items = [i for i in self.items if i.status not in ("done", "cancelled")]
+        self._emit()
+
+    def clear_all(self) -> None:
+        self.items = []
         self._emit()
 
     def pending(self) -> list[DownloadItem]:

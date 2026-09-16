@@ -222,8 +222,14 @@ async def download_resumable(client, message: Message, destination: Path,
                         raise Cancelled(f"Symlink detected at {destination}; aborting.") from exc
                     raise
                 try:
-                    # fd is append/trunc already; write chunk
+                    # fd is append/trunc already; write chunk. A short write
+                    # on a regular file means the disk is full — surface it
+                    # instead of silently corrupting the download.
                     _written = _os2.write(fd, chunk)
+                    if _written != len(chunk):
+                        raise DownloadError(
+                            f"Short write: {_written} of {len(chunk)} bytes — "
+                            f"disk full? Partial file kept at {destination}")
                     try:
                         _os2.fsync(fd)
                     except OSError:
@@ -234,7 +240,7 @@ async def download_resumable(client, message: Message, destination: Path,
                     except OSError:
                         pass
                 mode = "ab"
-                current += len(chunk)
+                current += _written
                 if current > MAX_FILE_BYTES:
                     raise DownloadError(
                         f"Download exceeded the {MAX_FILE_BYTES} cap; aborted.")

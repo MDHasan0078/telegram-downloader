@@ -159,19 +159,28 @@ async def _login_cli(client) -> None:
         return
     print("No session found — one-time login.")
     try:
-        # Hidden input: a bot token is a full secret and must not echo to
-        # the terminal/scrollback. Phone numbers are hidden too as a result.
-        phone = getpass.getpass("Phone (international, e.g. +8801XXXXXXXXX) or bot token (input hidden — type carefully): ").strip()
+        # Phone number is NOT secret — let the user see it so typos are
+        # caught before Telegram rejects it. Only a bot token is a secret,
+        # and it is entered hidden via getpass.
+        phone = input("Phone number (international, e.g. +8801XXXXXXXXX): ").strip()
+        if tg_client.looks_like_phone(phone) or phone.startswith("+"):
+            phone_input = phone
+            token_input = None
+        else:
+            token_input = getpass.getpass("Pasting a bot token? Enter it hidden:").strip()
+            while not token_input:
+                token_input = getpass.getpass("Bot token cannot be empty. Retry hidden:").strip()
+            phone_input = None
     except (EOFError, KeyboardInterrupt):
         print()
         raise RuntimeError("Login cancelled by user.")
-    if not phone:
-        raise RuntimeError("Phone/bot token required.")
+    if not phone and not token_input:
+        raise RuntimeError("Phone number or bot token required.")
     try:
-        if tg_client.looks_like_phone(phone):
-            await client.start(phone=phone)
+        if phone_input is not None:
+            await client.start(phone=phone_input)
         else:
-            await client.start(bot_token=phone)
+            await client.start(bot_token=token_input)
     except Exception as exc:
         from telethon import errors as terr
         if isinstance(exc, terr.FloodWaitError):
@@ -180,7 +189,8 @@ async def _login_cli(client) -> None:
         raise
     finally:
         try:
-            del phone
+            del phone_input
+            del token_input
         except NameError:
             pass
     try:
@@ -376,13 +386,14 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
                 return 0
         # Persist to queue (resume-all support) then download sequentially.
         store = QueueStore()
-        store.extend([DownloadItem(url=p.url, title=p.title,
-                                   ext=p.ext, size=p.size, status="queued") for p in ok])
+        added = store.extend([DownloadItem(url=p.url, title=p.title,
+                                           ext=p.ext, size=p.size,
+                                           mode=mode, status="queued") for p in ok])
         fails = 0
-        for item in list(store.items[-len(ok):]):
+        for item in added:
             try:
                 store.update(item.id, status="downloading")
-                final = await _download_one(client, item.url, out_dir, mode, item.title)
+                final = await _download_one(client, item.url, out_dir, item.mode, item.title)
                 store.update(item.id, status="done", progress=100.0, dest=str(final))
                 print(f"\nSaved: {final}")
             except Cancelled as exc:
@@ -394,7 +405,7 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
                 store.update(item.id, status="error",
                              error=_sanitize_display(str(exc)))
                 print(f"\nFailed {_sanitize_display(item.url)}: {_sanitize_display(exc)}")
-        print(f"\nDone: {len(ok)-fails} ok, {fails} failed. Queue saved; rerun to resume.")
+        print(f"\nDone: {len(added)-fails} ok, {fails} failed. Queue saved; rerun to resume.")
         return 1 if fails else 0
     finally:
         await client.disconnect()

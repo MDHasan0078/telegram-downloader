@@ -4,6 +4,12 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# One release pipeline at a time: a retagged/force-pushed v* must not race
+# the previous run's artifact rename + release attach.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -44,6 +50,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ github.ref_name }}"
+          generate_release_notes: true
           files: |
             dist/*.deb
             dist/SHA256SUMS-deb
@@ -71,7 +78,7 @@ jobs:
           test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             || { echo "cmdline-tools sdkmanager missing at $ANDROID_HOME"; exit 1; }
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-      - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh --debug
+      - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh
       - name: Rename APK to versioned release name
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -90,6 +97,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ github.ref_name }}"
+          generate_release_notes: true
           files: |
             build/apk/*.apk
             build/apk/SHA256SUMS-apk
@@ -132,6 +140,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ github.ref_name }}"
+          generate_release_notes: true
           files: |
             dist/*.dmg
             dist/SHA256SUMS-dmg

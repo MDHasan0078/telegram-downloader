@@ -16,6 +16,7 @@ import asyncio
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import converter, deps as deps_mod
@@ -25,7 +26,6 @@ from .config import (_sanitize_display, Settings, clear_session,
                      default_download_dir, ensure_download_dir,
                      harden_session_files, load_settings,
                      save_settings)
-from .converter import ffmpeg_to_mp4
 from .constants import MAX_BATCH_BYTES, MAX_URLS
 from .downloader import Cancelled, download_resumable
 from .queue_store import DownloadItem, QueueStore
@@ -427,7 +427,8 @@ def run_gui(port=None):
                 return
             for r in sel:
                 store.add(DownloadItem(url=r["url"], title=safe_filename(r["title"]),
-                                       ext=r["ext"], size=r["size"], status="queued"))
+                                       ext=r["ext"], size=r["size"], status="queued",
+                                       mode=r.get("mode") or state.get("mode") or st.output_mode or "1"))
             snack(page, f"Queued {len(sel)} file(s) — see Queue tab.")
             if "goto" in nav:
                 nav["goto"](1)
@@ -449,29 +450,44 @@ def run_gui(port=None):
                 files = getattr(res, "files", None) or []
                 if files:
                     fpath = Path(files[0].path)
-                    # Symlink/fifo/regular-file check + bounded read (mirror CLI).
+                    # No symlink/fifo bomb and no TOCTOU: open O_NOFOLLOW|O_RDONLY
+                    # first, then fstat the fd (a swapped-in link raises ELOOP and
+                    # the type/size checks run on the opened file itself).
+                    import os as _os
+                    import stat as _stat
+                    import errno as _errno
+                    nofollow = getattr(_os, "O_NOFOLLOW", 0)
                     try:
-                        if fpath.is_symlink() or getattr(fpath, "is_fifo", lambda: False)() or not fpath.is_file():
+                        fd = _os.open(fpath, _os.O_RDONLY | nofollow)
+                    except OSError as exc:
+                        if exc.errno == _errno.ELOOP:
+                            snack(page, "File must be a regular file (symlink refused).", error=True)
+                            return
+                        snack(page, f"Cannot open file: {exc}", error=True)
+                        return
+                    try:
+                        st = _os.fstat(fd)
+                        if not _stat.S_ISREG(st.st_mode):
                             snack(page, "File must be a regular file.", error=True)
                             return
-                        if fpath.stat().st_size > MAX_BATCH_BYTES:
-                            snack(page, "File too large (max 256 KB).", error=True)
+                        if st.st_size > MAX_BATCH_BYTES:
+                            snack(page, "File too large (max 256 KB). Split it or trim it.", error=True)
                             return
-                    except OSError as exc:
-                        snack(page, f"Cannot read file: {exc}", error=True)
-                        return
-                    try:
-                        with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                        with _os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+                            fd = -1
                             txt = fh.read(257 * 1024)
-                    except OSError as exc:
-                        snack(page, f"Cannot read file: {exc}", error=True)
-                        return
+                    finally:
+                        if fd != -1:
+                            try:
+                                _os.close(fd)
+                            except OSError:
+                                pass
                     urls = split_urls(txt)
                     url_box.value = "\n".join(urls)
                     snack(page, f"Loaded {len(urls)} URL(s) from file.")
                 page.update()
-            except Exception:
-                snack(page, "Cannot read file.", error=True)
+            except Exception as exc:
+                snack(page, f"Cannot read file: {exc}", error=True)
 
         def on_clear(e):
             url_box.value = ""
@@ -569,9 +585,8 @@ def run_gui(port=None):
     async def start_queue(page: ft.Page):
         if state["downloading"]:
             return
-        pend = [i for i in store.items if i.status == "queued"]
-        if not pend:
-            snack(page, "Queue is empty (or all done). Use Resume all / Start to retry errors.")
+        if not any(i.status == "queued" for i in store.items):
+            snack(page, "Queue is empty (or all done). Retry an error or add new links.")
             return
         state["downloading"] = True
         state["cancel"] = asyncio.Event()
@@ -580,25 +595,39 @@ def run_gui(port=None):
             c = await get_client(page)
             st = load_settings()
             out_dir = ensure_download_dir(st)
-            mode = state.get("mode") or st.output_mode or "1"
-            for item in pend:
-                if state["cancel"].is_set():
-                    store.update(item.id, status="cancelled", error="Cancelled by user.")
-                    continue
+            default_mode = st.output_mode or "1"
+            # Re-drain: pick queued items one at a time rather than a snapshot,
+            # so "Retry" or "Resume all" during a run is honoured instead of lost.
+            while not state["cancel"].is_set():
+                item = next((i for i in store.items if i.status == "queued"), None)
+                if item is None:
+                    break
                 store.update(item.id, status="downloading", error="")
+                mode = item.mode or default_mode
 
-                def _cb(cur, tot, _id=item.id):
+                def _cb(cur, tot, _id=item.id, _last=[0.0]):
                     it = store.get(_id)
                     if it:
                         it.current_bytes = cur
                         it.total_bytes = tot
                         it.progress = (cur * 100 / tot) if tot else 0
-                    refresh_queue()
+                    # Throttle: redraw at most ~4x/s; the loop's trailing
+                    # refresh_queue() covers the final state.
+                    now = time.monotonic()
+                    if now - _last[0] >= 0.25:
+                        _last[0] = now
+                        refresh_queue()
                 try:
                     from .telegram_utils import parse_message_url
                     from .telegram_utils import infer_extension
                     chat, mid, _ = parse_message_url(item.url)
-                    msg = await c.get_messages(chat, ids=mid)
+                    try:
+                        msg = await asyncio.wait_for(
+                            c.get_messages(chat, ids=mid), timeout=120)
+                    except asyncio.TimeoutError as exc:
+                        raise RuntimeError(
+                            "Telegram did not answer within 2 min — service down "
+                            "or API floodwaited. Try again shortly.") from exc
                     if not msg or not getattr(msg, "media", None):
                         raise RuntimeError("Message has no downloadable media.")
                     stem = safe_filename(item.title or f"msg-{mid}")
@@ -628,6 +657,7 @@ def run_gui(port=None):
                         refresh_queue()
                         import os as _os
                         import secrets as _secrets
+                        import threading as _threading
                         tmp = target.with_name(
                             f"{target.stem}.part.{_os.getpid()}.{_secrets.token_hex(8)}.mp4")
                         nofollow = getattr(_os, "O_NOFOLLOW", 0)
@@ -643,7 +673,26 @@ def run_gui(port=None):
                             if exc.errno == _errno.ELOOP:
                                 raise RuntimeError("Refusing to publish through symlink.") from exc
                             raise
-                        await asyncio.to_thread(ffmpeg_to_mp4, source, tmp, mode)
+                        t_cancel = _threading.Event()
+
+                        async def _watch_cancel():
+                            await state["cancel"].wait()
+                            t_cancel.set()
+                        watch = asyncio.create_task(_watch_cancel())
+                        try:
+                            await asyncio.to_thread(
+                                converter.ffmpeg_to_mp4, source, tmp, mode,
+                                cancel=t_cancel)
+                        finally:
+                            watch.cancel()
+                        if state["cancel"].is_set():
+                            try:
+                                tmp.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            store.update(item.id, status="cancelled",
+                                         error="Cancelled by user.")
+                            continue
                         if tmp.is_symlink():
                             try:
                                 tmp.unlink()
@@ -662,7 +711,11 @@ def run_gui(port=None):
                 except Cancelled as exc:
                     store.update(item.id, status="cancelled", error=_sanitize_display(str(exc)))
                 except Exception as exc:
-                    store.update(item.id, status="error", error=_sanitize_display(str(exc)))
+                    if state["cancel"].is_set():
+                        store.update(item.id, status="cancelled",
+                                     error="Cancelled by user.")
+                    else:
+                        store.update(item.id, status="error", error=_sanitize_display(str(exc)))
                 refresh_queue()
         except Exception as exc:
             snack(page, _sanitize_display(f"Download failed: {exc}"), error=True)
@@ -689,6 +742,12 @@ def run_gui(port=None):
         page = pg
         queue_list.controls.clear()
         items = list(store.items)
+        # Active + queued first, finished at the bottom (newest first within
+        # each group, matching the old reversed chronological display).
+        idx = {it.id: k for k, it in enumerate(store.items)}
+        _rank = {"downloading": 0, "converting": 1, "fetching": 2,
+                 "queued": 3, "done": 4, "cancelled": 5, "error": 6}
+        items.sort(key=lambda i: (_rank.get(i.status, 7), -idx.get(i.id, 0)))
         n_total = len(items)
         n_active = sum(1 for i in items if i.status in ("downloading", "converting", "fetching"))
         n_queued = sum(1 for i in items if i.status == "queued")
@@ -709,7 +768,7 @@ def run_gui(port=None):
                 "Add links from the Add tab to get started.",
                 action_label="Add downloads", action_icon=ft.Icons.ADD,
                 on_action=lambda e: nav["goto"](0) if "goto" in nav else None))
-        for it in reversed(items):
+        for it in items:
             pct = max(0.0, min(100.0, it.progress or 0))
             subtitle_bits = [b for b in
                              [it.ext or "", format_bytes(it.total_bytes or it.size)] if b]
@@ -720,6 +779,11 @@ def run_gui(port=None):
                                              on_click=lambda e, _id=it.id: (
                                                  store.update(_id, status="queued", error=""),
                                                  start_soon(page))))
+            if it.status in ("downloading", "converting", "fetching"):
+                actions.append(ft.IconButton(ft.Icons.STOP, tooltip="Cancel this download",
+                                             icon_color=ft.Colors.ERROR,
+                                             on_click=lambda e, _id=it.id: cancel_id(
+                                                 page, _id)))
             if it.status not in ("downloading", "converting", "fetching"):
                 actions.append(ft.IconButton(ft.Icons.CLOSE, tooltip="Remove",
                                              icon_color=ft.Colors.ON_SURFACE_VARIANT,
@@ -771,6 +835,22 @@ def run_gui(port=None):
 
     def start_soon(page):
         page.run_task(start_queue, page)
+
+    def cancel_id(page, target_id):
+        it = store.get(target_id)
+        if not it:
+            return
+        if it.status == "queued":
+            store.update(target_id, status="cancelled", error="Cancelled by user.")
+            refresh_queue()
+            snack(page, "Removed queued download.")
+            return
+        if it.status in ("downloading", "converting", "fetching"):
+            if state.get("cancel") and not state["cancel"].is_set():
+                state["cancel"].set()
+                snack(page, "Cancelling after this chunk — partial file kept for resume.")
+            else:
+                snack(page, "Already stopping…", error=True)
 
     def queue_view(page: ft.Page):
         import flet as ft
@@ -1029,9 +1109,34 @@ def run_gui(port=None):
                 info_row(ft.Icons.VIDEO_FILE, "FFmpeg", ff),
             ]
 
-        def on_reset(e):
+        async def on_reset(e):
+            # Destructive two-step: reset options, clear the saved session and
+            # the pending download queue. A stray click must not nuke secrets.
+            cp = await confirm_dialog(
+                page,
+                "Reset everything?",
+                "This clears your saved credentials, logs out the Telegram "
+                "session, and empties the download queue. This cannot be undone.")
+            if not cp:
+                return
+            if state.get("cancel") and not state.get("cancel").is_set():
+                state["cancel"].set()
+            try:
+                clear_session()
+            except Exception:
+                pass
+            store.clear_all()
             save_settings(Settings())
-            snack(page, "Reset. Re-enter API + folder.")
+            state["previews"] = []
+            state["mode"] = "1"
+            try:
+                settings_refs["mode_txt"].value = "Original"
+                settings_refs["folder_txt"].value = str(default_download_dir())
+            except Exception:
+                pass
+            refresh_queue()
+            refresh_settings_hint()
+            snack(page, "Reset complete. Re-enter API credentials.")
 
         first = not st.api_id or not st.api_hash or not st.download_dir
         conn_body: list = []
@@ -1200,9 +1305,28 @@ def run_gui(port=None):
         is_phone = tg_client.looks_like_phone(phone)
         # Do NOT pre-send code: client.start() sends exactly once; the
         # previous manual send caused double SMS + code invalidation.
+        async def _code_dialog() -> str:
+            # Telethon's default code_callback is blocking input() — that
+            # would freeze the asyncio loop. Always answer with a dialog.
+            f = ft.TextField(label="Login code from Telegram", autofocus=True)
+            d = ft.AlertDialog(title=ft.Text("Enter the code we just sent"),
+                               content=f,
+                               actions=[ft.TextButton("Cancel"), ft.TextButton("OK")])
+            f4: asyncio.Future = asyncio.get_event_loop().create_future()
+            d.actions[0].on_click = lambda e: (f4.set_result("") if not f4.done() else None, _hide_dlg(page, d))
+
+            def _ok(e):
+                if not f4.done():
+                    f4.set_result(f.value.strip())
+                _hide_dlg(page, d)
+            d.actions[1].on_click = _ok
+            _show_dlg(page, d)
+            val = await f4
+            _wipe_field(f)
+            return val or ""
         try:
             if is_phone:
-                await client.start(phone=phone)
+                await client.start(phone=phone, code_callback=_code_dialog)
             else:
                 await client.start(bot_token=phone)
             try:
