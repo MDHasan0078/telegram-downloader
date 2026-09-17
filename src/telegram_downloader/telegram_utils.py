@@ -68,6 +68,16 @@ def safe_filename(name: str) -> str:
     # Leading dash would make ffmpeg treat the filename as an option.
     if name.startswith("-"):
         name = "_" + name
+    # Windows reserved device names (case-insensitive, with or without ext).
+    base = name
+    if "." in name:
+        base = name.rsplit(".", 1)[0]
+    upper = base.upper()
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {
+        f"COM{i}" for i in range(1, 10)
+    } | {f"LPT{i}" for i in range(1, 10)}
+    if upper in reserved:
+        name = "_" + name
     return name or "telegram_video"
 
 

@@ -620,7 +620,7 @@ def cmd_deps(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tg-dl", description=f"Telegram Downloader v{__version__}")
+    p = argparse.ArgumentParser(prog="tg-dl", description=f"Telegram Downloader v{_app_version()}")
     p.add_argument("-V", "--version", action="version", version=f"tg-dl {_app_version()}")
     sub = p.add_subparsers(dest="cmd", required=False)
 

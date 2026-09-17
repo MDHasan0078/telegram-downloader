@@ -29,6 +29,13 @@ def test_safe_filename_control_chars():
     assert safe_filename("a\x00b\x1bc\x7fd") == "a_b_c_d"
 
 
+def test_safe_filename_windows_reserved_names():
+    for reserved in ("CON", "PRN", "AUX", "NUL", "COM1", "LPT9"):
+        assert safe_filename(reserved).startswith("_")
+    assert safe_filename("CON.txt") == "_CON.txt"
+    assert safe_filename("con") == "_con"
+
+
 def test_format_bytes():
     assert format_bytes(0) == "0.0 B"
     assert format_bytes(1536) == "1.5 KB"
