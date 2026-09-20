@@ -1705,7 +1705,6 @@ def run_gui(port=None):
             content=body_content,
             expand=True,
             max_width=1200,
-            alignment=ft.alignment.top_center,
             padding=24,
         )
 
