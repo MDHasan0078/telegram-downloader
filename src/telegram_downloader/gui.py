@@ -34,6 +34,7 @@ from .telegram_utils import format_bytes, safe_filename, split_urls
 import re as _re_module
 
 SEED = "#6750A4"
+_queue_widgets = {}  # item_id -> {card, progress_bar, pct_pill, detail_txt, ...}
 MODE_LABELS = {"1": "Original", "2": "Fast", "3": "Max"}
 
 
@@ -838,7 +839,6 @@ def run_gui(port=None):
             return
         import flet as ft
         page = pg
-        queue_list.controls.clear()
         items = list(store.items)
         # Active + queued first, finished at the bottom (newest first within
         # each group, matching the old reversed chronological display).
@@ -882,75 +882,135 @@ def run_gui(port=None):
                                           bg_color=ft.Colors.ERROR) if badge_count > 0 else None
                 except Exception:
                     pass
+        
+        # Remove widgets for items no longer in queue
+        current_ids = {it.id for it in items}
+        for old_id in list(_queue_widgets.keys()):
+            if old_id not in current_ids:
+                del _queue_widgets[old_id]
+        
         if not items:
-            queue_list.controls.append(empty_state(
-                ft.Icons.INBOX, "No downloads in queue",
-                "Add links from the Add tab to get started.",
-                action_label="Add downloads", action_icon=ft.Icons.ADD,
-                on_action=lambda e: nav["goto"](0) if "goto" in nav else None))
+            if not queue_list.controls or not isinstance(queue_list.controls[0], ft.Card):
+                queue_list.controls.clear()
+                queue_list.controls.append(empty_state(
+                    ft.Icons.INBOX, "No downloads in queue",
+                    "Add links from the Add tab to get started.",
+                    action_label="Add downloads", action_icon=ft.Icons.ADD,
+                    on_action=lambda e: nav["goto"](0) if "goto" in nav else None))
+            return
+        
+        # Remove empty state if present
+        if queue_list.controls and not hasattr(queue_list.controls[0], 'data'):
+            queue_list.controls.clear()
+        
+        # Build/update queue items incrementally
+        new_controls = []
         for it in items:
             pct = max(0.0, min(100.0, it.progress or 0))
-            subtitle_bits = [b for b in
-                             [it.ext or "", format_bytes(it.total_bytes or it.size)] if b]
-            actions = []
-            if it.status in ("error", "cancelled"):
-                actions.append(ft.IconButton(ft.Icons.REFRESH, tooltip="Retry",
-                                             icon_color=ft.Colors.PRIMARY,
-                                             on_click=lambda e, _id=it.id: (
-                                                 store.update(_id, status="queued", error=""),
-                                                 start_soon(page))))
-            if it.status in ("downloading", "converting", "fetching"):
-                actions.append(ft.IconButton(ft.Icons.STOP, tooltip="Stop current download\n(rest stay queued)",
-                                             icon_color=ft.Colors.ERROR,
-                                             on_click=lambda e, _id=it.id: cancel_id(
-                                                 page, _id)))
-            if it.status not in ("downloading", "converting", "fetching"):
-                actions.append(ft.IconButton(ft.Icons.CLOSE, tooltip="Remove",
-                                             icon_color=ft.Colors.ON_SURFACE_VARIANT,
-                                             on_click=lambda e, _id=it.id: (
-                                                 store.remove(_id), refresh_queue())))
-            title_txt = _sanitize_display(f"{it.title}{it.ext}", limit=120)
-            title_col: list = [ft.Text(title_txt, size=15, weight=ft.FontWeight.W_500,
-                                       max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)]
-            if subtitle_bits:
-                title_col.append(ft.Text("  •  ".join(subtitle_bits), size=12,
-                                         color=ft.Colors.ON_SURFACE_VARIANT))
-            head_row = ft.Row([state_icon(it.status),
-                        ft.Column(title_col, spacing=2, expand=True),
-                        pct_pill(f"{pct:.1f}%") if it.status in (
-                            "downloading", "converting") else ft.Container(),
-                        *actions], spacing=12)
-            card_body: list = [head_row]
-            # Plain-language status line for idle states (queued/done/cancelled).
-            if it.status in ("queued", "cancelled"):
-                card_body.append(status_label(it.status))
-            if it.status in ("downloading", "converting"):
-                speed = getattr(it, "download_speed", 0) or 0
-                speed_txt = f"  •  {format_bytes(speed)}/s" if speed > 0 else ""
-                detail = (f"{format_bytes(it.current_bytes)}/{format_bytes(it.total_bytes or it.size)}"
-                          + speed_txt
-                          + ("  •  converting…" if it.status == "converting"
-                             else "  •  downloading…"))
-                card_body += [
-                    ft.ProgressBar(value=pct / 100, bar_height=6),
-                    ft.Text(detail, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                ]
-            if it.status == "error" and it.error:
-                card_body.append(error_box(_sanitize_display(it.error)))
-            if it.status == "done":
-                if it.dest:
-                    card_body.append(ft.Row([
-                        ft.Icon(ft.Icons.CHECK_CIRCLE, size=16,
-                                color=ft.Colors.TERTIARY),
-                        ft.Text(it.dest, size=12, expand=True,
-                                color=ft.Colors.ON_SURFACE_VARIANT,
-                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                    ], spacing=8))
-                elif it.error:
-                    # Kept-original note (e.g. ffmpeg missing) surfaces here.
-                    card_body.append(hint_box(it.error))
-            queue_list.controls.append(
-                ft.Card(ft.Container(ft.Column(card_body, spacing=8), padding=16)))
+            
+            # Check if we already have widgets for this item
+            if it.id in _queue_widgets:
+                # Update existing widgets
+                widgets = _queue_widgets[it.id]
+                # Update progress bar
+                if widgets.get('progress_bar'):
+                    widgets['progress_bar'].value = pct / 100
+                # Update percentage pill
+                if widgets.get('pct_pill'):
+                    widgets['pct_pill'].content.value = f"{pct:.1f}%"
+                # Update detail text
+                if widgets.get('detail_txt'):
+                    speed = getattr(it, "download_speed", 0) or 0
+                    speed_txt = f"  •  {format_bytes(speed)}/s" if speed > 0 else ""
+                    detail = (f"{format_bytes(it.current_bytes)}/{format_bytes(it.total_bytes or it.size)}"
+                              + speed_txt
+                              + ("  •  converting…" if it.status == "converting"
+                                 else "  •  downloading…"))
+                    widgets['detail_txt'].value = detail
+                # Add existing card to controls
+                new_controls.append(widgets['card'])
+            else:
+                # Create new widgets for this item
+                subtitle_bits = [b for b in
+                                 [it.ext or "", format_bytes(it.total_bytes or it.size)] if b]
+                actions = []
+                if it.status in ("error", "cancelled"):
+                    actions.append(ft.IconButton(ft.Icons.REFRESH, tooltip="Retry",
+                                                 icon_color=ft.Colors.PRIMARY,
+                                                 on_click=lambda e, _id=it.id: (
+                                                     store.update(_id, status="queued", error=""),
+                                                     start_soon(page))))
+                if it.status in ("downloading", "converting", "fetching"):
+                    actions.append(ft.IconButton(ft.Icons.STOP, tooltip="Stop current download\n(rest stay queued)",
+                                                 icon_color=ft.Colors.ERROR,
+                                                 on_click=lambda e, _id=it.id: cancel_id(
+                                                     page, _id)))
+                if it.status not in ("downloading", "converting", "fetching"):
+                    actions.append(ft.IconButton(ft.Icons.CLOSE, tooltip="Remove",
+                                                 icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                                                 on_click=lambda e, _id=it.id: (
+                                                     store.remove(_id), refresh_queue())))
+                title_txt = _sanitize_display(f"{it.title}{it.ext}", limit=120)
+                title_col: list = [ft.Text(title_txt, size=15, weight=ft.FontWeight.W_500,
+                                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)]
+                if subtitle_bits:
+                    title_col.append(ft.Text("  •  ".join(subtitle_bits), size=12,
+                                             color=ft.Colors.ON_SURFACE_VARIANT))
+                
+                # Create mutable widgets we'll update later
+                pct_pill_widget = pct_pill(f"{pct:.1f}%") if it.status in (
+                    "downloading", "converting") else ft.Container()
+                
+                head_row = ft.Row([state_icon(it.status),
+                            ft.Column(title_col, spacing=2, expand=True),
+                            pct_pill_widget,
+                            *actions], spacing=12)
+                card_body: list = [head_row]
+                
+                # Plain-language status line for idle states (queued/done/cancelled).
+                if it.status in ("queued", "cancelled"):
+                    card_body.append(status_label(it.status))
+                
+                progress_bar = None
+                detail_txt = None
+                if it.status in ("downloading", "converting"):
+                    speed = getattr(it, "download_speed", 0) or 0
+                    speed_txt = f"  •  {format_bytes(speed)}/s" if speed > 0 else ""
+                    detail = (f"{format_bytes(it.current_bytes)}/{format_bytes(it.total_bytes or it.size)}"
+                              + speed_txt
+                              + ("  •  converting…" if it.status == "converting"
+                                 else "  •  downloading…"))
+                    progress_bar = ft.ProgressBar(value=pct / 100, bar_height=6)
+                    detail_txt = ft.Text(detail, size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+                    card_body += [progress_bar, detail_txt]
+                
+                if it.status == "error" and it.error:
+                    card_body.append(error_box(_sanitize_display(it.error)))
+                if it.status == "done":
+                    if it.dest:
+                        card_body.append(ft.Row([
+                            ft.Icon(ft.Icons.CHECK_CIRCLE, size=16,
+                                    color=ft.Colors.TERTIARY),
+                            ft.Text(it.dest, size=12, expand=True,
+                                    color=ft.Colors.ON_SURFACE_VARIANT,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                        ], spacing=8))
+                    elif it.error:
+                        # Kept-original note (e.g. ffmpeg missing) surfaces here.
+                        card_body.append(hint_box(it.error))
+                
+                card = ft.Card(ft.Container(ft.Column(card_body, spacing=8), padding=16))
+                new_controls.append(card)
+                
+                # Store references to mutable widgets
+                _queue_widgets[it.id] = {
+                    'card': card,
+                    'progress_bar': progress_bar,
+                    'pct_pill': pct_pill_widget if hasattr(pct_pill_widget, 'content') else None,
+                    'detail_txt': detail_txt,
+                }
+        
+        queue_list.controls = new_controls
         try:
             page.update()
         except Exception:
