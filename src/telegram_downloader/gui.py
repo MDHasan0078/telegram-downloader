@@ -1761,7 +1761,6 @@ def run_gui(port=None):
         body = ft.Container(
             content=body_content,
             expand=True,
-            max_width=1200,
             padding=24,
         )
 
