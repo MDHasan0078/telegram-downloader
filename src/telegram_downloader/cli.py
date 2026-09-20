@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import os
+import secrets
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -117,13 +120,11 @@ def _ensure_dl_dir(s):
 
 class _CliProgress:
     def __init__(self, total: int, label: str):
-        import time
         self.total = total
         self.label = label
         self._t0 = time.monotonic()
 
     def __call__(self, cur: int, total: int):
-        import time
         self.total = total or self.total
         el = max(time.monotonic() - self._t0, 0.001)
         sp = cur / el
@@ -147,7 +148,8 @@ async def _login_cli(client) -> None:
         # Identity pinning: a planted session for a different account is
         # refused instead of auto-trusted.
         try:
-            pinned = (_load().user_id or "").strip() if hasattr(_load(), "user_id") else ""
+            loaded = _load()
+            pinned = (loaded.user_id or "").strip() if hasattr(loaded, "user_id") else ""
             me_id = str(getattr(me, "id", "") or "")
             if pinned and me_id and pinned != me_id:
                 try:
@@ -185,6 +187,7 @@ async def _login_cli(client) -> None:
         # caught before Telegram rejects it. Only a bot token is a secret,
         # and it is entered hidden via getpass.
         phone = input("Phone number (international, e.g. +8801XXXXXXXXX): ").strip()
+        token_input = None
         if tg_client.looks_like_phone(phone) or phone.startswith("+"):
             phone_input = phone
             token_input = None
@@ -245,6 +248,10 @@ async def _download_one(client, url: str, out_dir: Path, mode: str, custom_title
         except terr.FloodWaitError as exc2:
             raise DownloadError(
                 f"Telegram rate-limit ({exc2.seconds}s). Try again later.") from exc2
+        except asyncio.TimeoutError:
+            raise DownloadError("Telegram request timed out")
+    except asyncio.TimeoutError:
+        raise DownloadError("Telegram request timed out")
     if not msg:
         raise DownloadError("Message not found / no access.")
     if not getattr(msg, "media", None):
@@ -285,15 +292,13 @@ async def _download_one(client, url: str, out_dir: Path, mode: str, custom_title
             print("ffmpeg missing — keeping original file. Install: " +
                   next((d.install_for_current_os() for d in deps_mod.check_all() if d.name.startswith("ffmpeg")), ""))
             return source
-        import os as _os
-        import secrets as _secrets
         # O_EXCL pre-create: close race where ffmpeg -y would follow a
         # symlink planted between exists check and exec.
-        tmp = target.with_name(f"{target.stem}.part.{_os.getpid()}.{_secrets.token_hex(8)}.mp4")
-        nofollow = getattr(_os, "O_NOFOLLOW", 0)
+        tmp = target.with_name(f"{target.stem}.part.{os.getpid()}.{secrets.token_hex(8)}.mp4")
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = _os.open(tmp, _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | nofollow, 0o600)
-            _os.close(fd)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+            os.close(fd)
             # ffmpeg will truncate; ensure file is 0600 and not a link
             if tmp.is_symlink():
                 raise DownloadError("Refusing to publish through symlink.")
@@ -307,8 +312,7 @@ async def _download_one(client, url: str, out_dir: Path, mode: str, custom_title
         print("Converting to MP4...")
         try:
             # Offload so event loop stays cancellable (was sync 1h block).
-            import asyncio as _asyncio
-            await _asyncio.to_thread(ffmpeg_to_mp4, source, tmp, mode)
+            await asyncio.to_thread(ffmpeg_to_mp4, source, tmp, mode)
         except BaseException:
             try:
                 tmp.unlink(missing_ok=True)
@@ -321,6 +325,12 @@ async def _download_one(client, url: str, out_dir: Path, mode: str, custom_title
             except OSError:
                 pass
             raise DownloadError("Refusing to publish converter output through symlink.")
+        if target.is_symlink():
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise DownloadError("Refusing to publish through symlink at target path.")
         tmp.replace(target)
         if target.exists() and target.stat().st_size > 0:
             try:

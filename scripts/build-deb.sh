@@ -10,7 +10,9 @@ cd "$(dirname "$0")/.."
 # immediately, so any print after it is dead code (VER would be empty).
 VER="$(python3 -c '
 import re, sys
-m = re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M)
+with open("pyproject.toml") as f:
+    toml = f.read()
+m = re.search(r"^version\s*=\s*\"([^\"]+)\"", toml, re.M)
 if not m:
     sys.stderr.write("build-deb.sh: cannot find version in pyproject.toml\n")
     sys.exit(1)

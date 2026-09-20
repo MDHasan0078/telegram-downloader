@@ -8,7 +8,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
   echo "On a Mac: pip install 'flet[all]' && ./scripts/build-dmg.sh"
   exit 1
 fi
-pip install -U "flet[all]==0.86.5" 2>&1 | tail -2
+pip install -U "flet[all]==0.86.5"
 flet build macos --project telegram_downloader.gui --module-name main --yes
 echo "App under build/macos/. Drag to /Applications or package with create-dmg:"
 echo "  brew install create-dmg && create-dmg build/*.dmg build/macos/*.app"

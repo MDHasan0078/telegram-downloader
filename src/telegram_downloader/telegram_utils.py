@@ -133,7 +133,11 @@ def auto_title_from_message(message, chat) -> str:
     except Exception:
         pass
     chat_name = chat_name or (str(chat) if isinstance(chat, str) else "Telegram")
-    candidates.append(f"{chat_name} - {getattr(message, 'id', 'video')}")
+    msg_id = getattr(message, 'id', 0)
+    if msg_id:
+        candidates.append(f"{chat_name} - {msg_id}")
+    else:
+        candidates.append(chat_name)
     title = candidates[0] if candidates else "telegram_video"
     title = re.sub(r"[\n\r\t]+", " ", title)
     title = re.sub(r"\s+", " ", title).strip()

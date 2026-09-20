@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
@@ -210,6 +211,7 @@ class QueueStore:
     def save(self) -> None:
         try:
             if len(self.items) > MAX_QUEUE_ITEMS:
+                print(f"Warning: queue overflow, dropped {len(self.items) - MAX_QUEUE_ITEMS} oldest item(s)", file=sys.stderr)
                 self.items = self.items[-MAX_QUEUE_ITEMS:]
             data = json.dumps([i.to_dict() for i in self.items], indent=2).encode("utf-8")
             # Never silently drop the whole save when oversized: evict
@@ -219,6 +221,7 @@ class QueueStore:
                 self.items = self.items[1:]
                 data = json.dumps([i.to_dict() for i in self.items], indent=2).encode("utf-8")
             if len(data) > MAX_QUEUE_BYTES:
+                print("Warning: queue data exceeds size limit, save skipped", file=sys.stderr)
                 return
             _atomic_write(self.path, data)
         except OSError:

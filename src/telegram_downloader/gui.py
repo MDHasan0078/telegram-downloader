@@ -101,8 +101,8 @@ def run_gui(port=None):
                     except Exception:
                         pass
                     raise RuntimeError(
-                        "Session identity changed (different Telegram account). "
-                        "Signed out for safety — please log in again.")
+                        "You seem to have switched Telegram accounts. "
+                        "For safety, you've been signed out. Please log in again.")
                 if me_id:
                     state["me_id"] = me_id
             except RuntimeError:
@@ -121,7 +121,7 @@ def run_gui(port=None):
                 _snackbars[id(page)] = sb
                 page.overlay.append(sb)
             sb.content = ft.Text(msg)
-            sb.bgcolor = ft.Colors.ERROR_CONTAINER if error else None
+            sb.bgcolor = ft.Colors.ERROR_CONTAINER if error else ft.Colors.PRIMARY_CONTAINER
             sb.open = True
             page.update()
         except Exception:
@@ -205,14 +205,14 @@ def run_gui(port=None):
             ft.Text(text, size=12, weight=ft.FontWeight.BOLD,
                     color=ft.Colors.ON_PRIMARY_CONTAINER),
             bgcolor=ft.Colors.PRIMARY_CONTAINER,
-            border_radius=8, padding=8)
+            border_radius=8, padding=ft.padding.symmetric(horizontal=12, vertical=4))
 
     def status_label(status: str):
         """Small theme-aware status text for non-active queue rows."""
         mapping = {
             "queued": ("Queued — waiting to start", ft.Colors.ON_SURFACE_VARIANT),
             "fetching": ("Fetching…", ft.Colors.PRIMARY),
-            "done": ("Saved", ft.Colors.GREEN),
+            "done": ("Saved", ft.Colors.TERTIARY),
             "error": ("Failed — see details below", ft.Colors.ERROR),
             "cancelled": ("Cancelled — partial kept for resume",
                            ft.Colors.ON_SURFACE_VARIANT),
@@ -224,7 +224,7 @@ def run_gui(port=None):
         return ft.Container(
             ft.Row([ft.Icon(ft.Icons.ERROR, size=16,
                             color=ft.Colors.ON_ERROR_CONTAINER),
-                    ft.Text(message, size=12, expand=True,
+                    ft.Text(message, size=12, expand=True, selectable=True,
                             color=ft.Colors.ON_ERROR_CONTAINER)],
                    spacing=8),
             bgcolor=ft.Colors.ERROR_CONTAINER, border_radius=8, padding=12)
@@ -241,7 +241,7 @@ def run_gui(port=None):
                     action_label: str | None = None,
                     action_icon=None, on_action=None):
         controls = [
-            ft.Icon(icon, size=64, color=ft.Colors.PRIMARY),
+            ft.Icon(icon, size=48, color=ft.Colors.PRIMARY),
             ft.Text(title, size=20, weight=ft.FontWeight.W_600),
             ft.Text(subtitle, size=14, color=ft.Colors.ON_SURFACE_VARIANT),
         ]
@@ -259,8 +259,8 @@ def run_gui(port=None):
             "queued": (ft.Icons.SCHEDULE, ft.Colors.ON_SURFACE_VARIANT),
             "fetching": (ft.Icons.SYNC, ft.Colors.PRIMARY),
             "downloading": (ft.Icons.DOWNLOAD, ft.Colors.PRIMARY),
-            "converting": (ft.Icons.SYNC, ft.Colors.ORANGE),
-            "done": (ft.Icons.CHECK_CIRCLE, ft.Colors.GREEN),
+            "converting": (ft.Icons.SYNC, ft.Colors.SECONDARY),
+            "done": (ft.Icons.CHECK_CIRCLE, ft.Colors.TERTIARY),
             "error": (ft.Icons.ERROR, ft.Colors.ERROR),
             "cancelled": (ft.Icons.CANCEL, ft.Colors.ON_SURFACE_VARIANT),
         }
@@ -269,29 +269,52 @@ def run_gui(port=None):
 
     # ------------------------------------------------------------ ADD page
     def downloads_view(page: ft.Page):
+        url_count_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+
+        def _on_url_change(e):
+            import re
+            text = url_box.value or ""
+            urls = re.findall(r'https?://t\.me/\S+', text)
+            n = len(urls)
+            url_count_txt.value = f"{n} URL{'s' if n != 1 else ''} detected" if n else ""
+            url_box.helper_text = (url_count_txt.value
+                                   if n else "Nothing downloads until you confirm below.")
+            try:
+                page.update()
+            except Exception:
+                pass
+
         url_box = ft.TextField(label="Telegram link(s)",
                                hint_text="https://t.me/channel/123 (one per line)",
-                               helper="Nothing downloads until you confirm below.",
+                               helper_text="Nothing downloads until you confirm below.",
                                prefix_icon=ft.Icons.LINK,
-                               multiline=True, min_lines=3, max_lines=6, expand=True)
+                               multiline=True, min_lines=3, max_lines=6, expand=True,
+                               text_size=16, content_padding=ft.padding.all(12),
+                               on_change=_on_url_change)
         preview_list = ft.ListView(spacing=8, expand=True)
-        status_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
+        status_txt = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT,
                              expand=True)
         count_txt = ft.Text("No previews yet — paste links and tap Fetch titles.",
                             size=12, color=ft.Colors.ON_SURFACE_VARIANT)
         selected_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
                                expand=True)
-        fetch_btn = ft.FilledButton("Fetch titles", icon=ft.Icons.SEARCH)
+        fetch_btn = ft.FilledButton("Fetch titles", icon=ft.Icons.SEARCH, height=40)
         dl_btn = ft.FilledButton("Download selected", icon=ft.Icons.DOWNLOAD,
-                                 disabled=True)
-        bar = ft.ProgressBar(visible=False)
+                                 disabled=True, height=40)
+        fetch_label = ft.Text("Fetching titles...", size=12,
+                              color=ft.Colors.PRIMARY, visible=False)
+        bar = ft.ProgressBar(visible=False, bar_height=6)
+        fetch_row = ft.Row([fetch_label, bar], spacing=8, visible=False)
         mode_seg = ft.SegmentedButton(
             segments=[ft.Segment(value="1", label=ft.Text("Original"),
-                                 icon=ft.Icons.FILE_DOWNLOAD),
+                                 icon=ft.Icons.FILE_DOWNLOAD,
+                                 tooltip="Original: raw file, fastest, no conversion"),
                       ft.Segment(value="2", label=ft.Text("Fast"),
-                                 icon=ft.Icons.BOLT),
+                                 icon=ft.Icons.BOLT,
+                                 tooltip="Fast: compressed MP4, veryfast preset, smaller file"),
                       ft.Segment(value="3", label=ft.Text("Max"),
-                                 icon=ft.Icons.HD)],
+                                 icon=ft.Icons.HD,
+                                 tooltip="Max: best quality compressed, medium speed, smallest file")],
             selected=[state["mode"] if state["mode"] in MODE_LABELS else "1"])
         state["mode_seg"] = mode_seg
 
@@ -323,10 +346,10 @@ def run_gui(port=None):
             if not urls:
                 snack(page, "Paste at least one t.me link first.", error=True)
                 return
-            if len(urls) >= MAX_URLS:
+            if len(urls) > MAX_URLS:
                 snack(page, f"Capped at {MAX_URLS} URLs; extra links ignored.")
             state["fetching"] = True
-            bar.visible = True
+            fetch_row.visible = True
             status_txt.value = f"Fetching {len(urls)} title(s)..."
             fetch_btn.disabled = True
             page.update()
@@ -359,7 +382,7 @@ def run_gui(port=None):
                 snack(page, _sanitize_display(str(exc)), error=True)
             finally:
                 state["fetching"] = False
-                bar.visible = False
+                fetch_row.visible = False
                 fetch_btn.disabled = False
                 page.update()
 
@@ -395,7 +418,7 @@ def run_gui(port=None):
                         chk,
                         ft.Column([title_field,
                                    ft.Text(f"{r['ext']}  •  {format_bytes(r['size'])}",
-                                           size=11, color=ft.Colors.ON_SURFACE_VARIANT)],
+                                           size=12, color=ft.Colors.ON_SURFACE_VARIANT)],
                                   spacing=2, expand=True),
                     ], spacing=12), padding=16)))
                 else:
@@ -469,6 +492,9 @@ def run_gui(port=None):
             try:
                 files = getattr(res, "files", None) or []
                 if files:
+                    if files[0].path is None:
+                        snack(page, "File picker returned no path.", error=True)
+                        return
                     fpath = Path(files[0].path)
                     # No symlink/fifo bomb and no TOCTOU: open O_NOFOLLOW|O_RDONLY
                     # first, then fstat the fd (a swapped-in link raises ELOOP and
@@ -539,14 +565,14 @@ def run_gui(port=None):
             section("Add Download", [
                 url_box,
                 ft.Row([ft.Text("Mode:", size=14), mode_seg], spacing=16),
-                ft.Text("Fast / Max need ffmpeg — Original works without it.",
+                ft.Text("Original = raw file (fastest). Fast = compressed MP4 (veryfast, smaller). Max = best quality compressed (medium, smallest).",
                         size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ft.Row([fetch_btn,
                         ft.OutlinedButton("Load .txt", icon=ft.Icons.FILE_OPEN,
                                           on_click=on_load_file),
                         ft.TextButton("Clear", icon=ft.Icons.CLEAR,
-                                      on_click=on_clear)], spacing=12),
-                bar,
+                                      on_click=on_clear)], spacing=12, wrap=True),
+                fetch_row,
                 ft.Row([ft.Icon(ft.Icons.INFO, size=16,
                                 color=ft.Colors.ON_SURFACE_VARIANT),
                         status_txt], spacing=8),
@@ -558,21 +584,19 @@ def run_gui(port=None):
                         ft.TextButton("None", on_click=on_select_none)],
                        spacing=4),
                 preview_list,
-                ft.Row([selected_txt, dl_btn], spacing=12),
+                ft.Row([selected_txt, dl_btn], spacing=12, wrap=True),
             ], icon=ft.Icons.PLAYLIST_ADD_CHECK,
                 subtitle="Tick + edit titles, then confirm."),
             section("Quick Actions", [
                 ft.Row([
                     ft.OutlinedButton("Open folder", icon=ft.Icons.FOLDER_OPEN,
                                       on_click=lambda e: open_folder(page)),
-                    ft.OutlinedButton("Check dependencies", icon=ft.Icons.BUILD,
-                                      on_click=lambda e: nav["goto"](3) if "goto" in nav else None),
                     ft.OutlinedButton("Settings", icon=ft.Icons.SETTINGS,
                                       on_click=lambda e: nav["goto"](2) if "goto" in nav else None),
                 ], spacing=12, run_spacing=12, wrap=True),
             ], icon=ft.Icons.BOLT,
                 subtitle="Common destinations and checks."),
-        ], spacing=24, scroll=ft.ScrollMode.AUTO, expand=True)
+        ], spacing=20, scroll=ft.ScrollMode.AUTO, expand=True)
 
     def open_folder(page):
         # limit display of full path in snacks: redact home
@@ -585,7 +609,7 @@ def run_gui(port=None):
                 return str(p)
         p = ensure_download_dir(load_settings())
         if not p.is_absolute():
-            snack(page, f"Refusing suspicious folder: {_redact_home(p)}", error=True)
+            snack(page, f"Cannot use this folder: {_redact_home(p)}", error=True)
             return
         try:
             # No `--`: macOS open(1) and old xdg-open don't support bare
@@ -633,12 +657,16 @@ def run_gui(port=None):
                 store.update(item.id, status="downloading", error="")
                 mode = item.mode or default_mode
 
-                def _cb(cur, tot, _id=item.id, _last=[0.0]):
+                def _cb(cur, tot, _id=item.id, _last=[0.0], _start=[0.0]):
+                    if _start[0] == 0.0:
+                        _start[0] = time.monotonic()
                     it = store.get(_id)
                     if it:
                         it.current_bytes = cur
                         it.total_bytes = tot
                         it.progress = (cur * 100 / tot) if tot else 0
+                        elapsed = time.monotonic() - _start[0]
+                        it.download_speed = (cur / elapsed) if elapsed > 0 else 0
                     # Throttle: redraw at most ~4x/s; the loop's trailing
                     # refresh_queue() covers the final state.
                     now = time.monotonic()
@@ -648,7 +676,13 @@ def run_gui(port=None):
                 try:
                     from .telegram_utils import parse_message_url
                     from .telegram_utils import infer_extension
-                    chat, mid, _ = parse_message_url(item.url)
+                    try:
+                        chat, mid, _ = parse_message_url(item.url)
+                    except ValueError as exc:
+                        store.update(item.id, status="error",
+                                     error=f"Invalid message URL: {exc}")
+                        refresh_queue()
+                        continue
                     try:
                         # Race the metadata fetch against Cancel: without this a
                         # stuck get_messages holds the item "downloading" for up
@@ -677,12 +711,10 @@ def run_gui(port=None):
                         else:
                             await _cancel_pending()
                             raise RuntimeError(
-                                "Telegram did not answer within 2 min — service down "
-                                "or API floodwaited. Try again shortly.")
+                                "Telegram didn't respond within 2 minutes. The service may be busy — please try again shortly.")
                     except asyncio.TimeoutError as exc:
                         raise RuntimeError(
-                            "Telegram did not answer within 2 min — service down "
-                            "or API floodwaited. Try again shortly.") from exc
+                            "Telegram didn't respond within 2 minutes. The service may be busy — please try again shortly.") from exc
                     if not msg or not getattr(msg, "media", None):
                         raise RuntimeError("Message has no downloadable media.")
                     stem = safe_filename(item.title or f"msg-{mid}")
@@ -762,6 +794,12 @@ def run_gui(port=None):
                             except OSError:
                                 pass
                             raise RuntimeError("Refusing to publish through symlink.")
+                        if target.is_symlink():
+                            try:
+                                tmp.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            raise RuntimeError("Refusing to publish through symlink at target path.")
                         tmp.replace(target)
                         try:
                             if not source.is_symlink():
@@ -822,9 +860,31 @@ def run_gui(port=None):
             if not items:
                 queue_header_txt["summary"].value = "Nothing here yet."
             else:
-                queue_header_txt["summary"].value = (
-                    f"{n_total} total  •  {n_active} active  •  "
-                    f"{n_queued} queued  •  {n_done} done  •  {n_failed} need attention")
+                ctrl = queue_header_txt["summary"]
+                ctrl.value = ""
+                ctrl.spans = [
+                    ft.TextSpan(f"{n_active} active",
+                                ft.TextStyle(color=ft.Colors.PRIMARY)),
+                    ft.TextSpan("  "),
+                    ft.TextSpan(f"{n_queued} queued",
+                                ft.TextStyle(color=ft.Colors.ON_SURFACE_VARIANT)),
+                    ft.TextSpan("  "),
+                    ft.TextSpan(f"{n_done} done",
+                                ft.TextStyle(color=ft.Colors.TERTIARY)),
+                    ft.TextSpan("  "),
+                    ft.TextSpan(f"{n_failed} need attention",
+                                ft.TextStyle(color=ft.Colors.ERROR)),
+                ]
+        # Update Queue navigation badge with active + error count.
+        badge_count = n_active + n_failed
+        for key in ("rail_dest", "bar_dest"):
+            dest = queue_header_txt.get(key)
+            if dest is not None:
+                try:
+                    dest.badge = ft.Badge(str(badge_count),
+                                          bg_color=ft.Colors.ERROR) if badge_count > 0 else None
+                except Exception:
+                    pass
         if not items:
             queue_list.controls.append(empty_state(
                 ft.Icons.INBOX, "No downloads in queue",
@@ -868,7 +928,10 @@ def run_gui(port=None):
             if it.status in ("queued", "cancelled"):
                 card_body.append(status_label(it.status))
             if it.status in ("downloading", "converting"):
+                speed = getattr(it, "download_speed", 0) or 0
+                speed_txt = f"  •  {format_bytes(speed)}/s" if speed > 0 else ""
                 detail = (f"{format_bytes(it.current_bytes)}/{format_bytes(it.total_bytes or it.size)}"
+                          + speed_txt
                           + ("  •  converting…" if it.status == "converting"
                              else "  •  downloading…"))
                 card_body += [
@@ -881,7 +944,7 @@ def run_gui(port=None):
                 if it.dest:
                     card_body.append(ft.Row([
                         ft.Icon(ft.Icons.CHECK_CIRCLE, size=16,
-                                color=ft.Colors.GREEN),
+                                color=ft.Colors.TERTIARY),
                         ft.Text(it.dest, size=12, expand=True,
                                 color=ft.Colors.ON_SURFACE_VARIANT,
                                 max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
@@ -956,7 +1019,7 @@ def run_gui(port=None):
                "Track progress, retry errors, clear finished downloads."),
             toolbar,
             queue_list,
-        ], spacing=16, expand=True)
+        ], spacing=20, expand=True)
 
     # ------------------------------------------------------------ settings
     settings_refs: dict = {}
@@ -976,7 +1039,8 @@ def run_gui(port=None):
     def settings_view(page: ft.Page):
         import flet as ft
         st = load_settings()
-        api_id_f = ft.TextField(label="API ID (my.telegram.org → API development tools)",
+        api_id_f = ft.TextField(label="API ID",
+                                helper_text="Get from my.telegram.org → API development tools",
                                 value=st.api_id or "", prefix_icon=ft.Icons.API)
         api_hash_f = ft.TextField(label="API hash (keep private)", value=st.api_hash or "",
                                   password=True, can_reveal_password=True,
@@ -984,12 +1048,37 @@ def run_gui(port=None):
         dl_f = ft.TextField(label="Download folder",
                             value=st.download_dir or str(default_download_dir()),
                             prefix_icon=ft.Icons.FOLDER, expand=True)
+        folder_error = ft.Container(visible=False)
+
+        def _validate_folder(e):
+            path = (dl_f.value or "").strip()
+            if not path:
+                folder_error.visible = False
+                try:
+                    page.update()
+                except Exception:
+                    pass
+                return
+            try:
+                tmp = Settings()
+                tmp.download_dir = path
+                ensure_download_dir(tmp)
+                folder_error.visible = False
+            except (ValueError, OSError) as exc:
+                folder_error.content = error_box(f"Cannot use folder: {_sanitize_display(str(exc))}")
+                folder_error.visible = True
+            try:
+                page.update()
+            except Exception:
+                pass
+
+        dl_f.on_change = _validate_folder
         mode_txt = ft.Text(MODE_LABELS.get(st.output_mode, st.output_mode), size=14)
         folder_txt = ft.Text(st.download_dir or str(default_download_dir()), size=14,
                              max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         theme_sw = ft.Switch(value=(st.theme or "dark") != "light")
         settings_refs.update(mode_txt=mode_txt, folder_txt=folder_txt, theme_sw=theme_sw)
-        msg = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+        settings_error = ft.Container(visible=False)
 
         async def pick_dir(e):
             fp = ft.FilePicker()
@@ -1014,8 +1103,8 @@ def run_gui(port=None):
             s.api_hash = api_hash_f.value.strip() or None
             s.download_dir = dl_f.value.strip()
             if s.api_id and not s.api_id.isdigit():
-                msg.value = "API ID must be numeric."
-                msg.color = ft.Colors.ERROR
+                settings_error.content = error_box("API ID must be numeric.")
+                settings_error.visible = True
                 page.update()
                 return
             if s.download_dir:
@@ -1024,14 +1113,14 @@ def run_gui(port=None):
                     # root, and symlinks (raises ValueError).
                     ensure_download_dir(s)
                 except (ValueError, OSError) as exc:
-                    msg.value = f"Cannot use folder: {exc}"
-                    msg.color = ft.Colors.ERROR
+                    settings_error.content = error_box(f"Cannot use folder: {_sanitize_display(str(exc))}")
+                    settings_error.visible = True
                     page.update()
                     return
             save_settings(s)
             refresh_settings_hint()
-            msg.value = "Settings saved."
-            msg.color = ft.Colors.PRIMARY
+            settings_error.visible = False
+            folder_error.visible = False
             page.update()
             snack(page, "Settings saved.")
 
@@ -1124,23 +1213,36 @@ def run_gui(port=None):
 
         theme_sw.on_change = on_theme
 
+        check_updates_btn = ft.FilledTonalButton("Check for Updates", icon=ft.Icons.UPDATE,
+                                                  on_click=on_check_updates)
+
         async def on_check_updates(e):
-            snack(page, "Checking for updates...")
-            info = await asyncio.to_thread(updates.check_for_update)
-            if info is None:
-                snack(page, "Could not reach the update server.", error=True)
-                return
-            if not info.is_newer_than(app_version()):
-                snack(page, f"You are up to date (v{app_version()}).")
-                return
-            choice = await update_dialog(page, info)
-            if choice == "page":
-                try:
-                    updates.open_release_page(info.release_url)
-                except Exception as exc:
-                    snack(page, f"Cannot open browser: {exc}", error=True)
-            elif choice == "download":
-                await download_installer(page, info)
+            check_updates_btn.disabled = True
+            check_updates_btn.text = "Checking..."
+            check_updates_btn.icon = ft.Icons.HOURGLASS_EMPTY
+            page.update()
+            try:
+                snack(page, "Checking for updates...")
+                info = await asyncio.to_thread(updates.check_for_update)
+                if info is None:
+                    snack(page, "Could not reach the update server.", error=True)
+                    return
+                if not info.is_newer_than(app_version()):
+                    snack(page, f"You are up to date (v{app_version()}).")
+                    return
+                choice = await update_dialog(page, info)
+                if choice == "page":
+                    try:
+                        updates.open_release_page(info.release_url)
+                    except Exception as exc:
+                        snack(page, f"Cannot open browser: {exc}", error=True)
+                elif choice == "download":
+                    await download_installer(page, info)
+            finally:
+                check_updates_btn.disabled = False
+                check_updates_btn.text = "Check for Updates"
+                check_updates_btn.icon = ft.Icons.UPDATE
+                page.update()
 
         async def download_installer(page, info):
             asset = info.asset_for_platform()
@@ -1223,9 +1325,11 @@ def run_gui(port=None):
             api_id_f, api_hash_f,
             ft.Row([dl_f, ft.OutlinedButton("Browse", icon=ft.Icons.FOLDER_OPEN,
                                             on_click=pick_dir)], spacing=12),
-            msg,
-            ft.Row([ft.FilledButton("Save", icon=ft.Icons.SAVE, on_click=on_save),
-                    ft.FilledTonalButton("Login / verify", icon=ft.Icons.LOGIN,
+            folder_error,
+            settings_error,
+            ft.Row([ft.FilledButton("Save", icon=ft.Icons.SAVE, on_click=on_save)],
+                   spacing=12, wrap=True),
+            ft.Row([ft.FilledTonalButton("Login / verify", icon=ft.Icons.LOGIN,
                                           on_click=on_login),
                     ft.OutlinedButton("Logout", icon=ft.Icons.LOGOUT,
                                       on_click=on_logout)], spacing=12, wrap=True),
@@ -1248,8 +1352,7 @@ def run_gui(port=None):
                 ft.Row([ft.Icon(ft.Icons.DARK_MODE, size=20,
                                 color=ft.Colors.PRIMARY),
                         ft.Column([ft.Text("Dark Theme", size=14),
-                                   ft.Text("Default is dark. The app does not follow "
-                                           "the system theme.", size=12,
+                                   ft.Text("Use dark theme.", size=12,
                                            color=ft.Colors.ON_SURFACE_VARIANT)],
                                   spacing=2, expand=True),
                         theme_sw], spacing=12),
@@ -1257,20 +1360,19 @@ def run_gui(port=None):
                 subtitle="Dark-first, like the reference app."),
             section("About", [
                 *_about_rows(),
-                ft.Row([ft.FilledTonalButton("Check for Updates", icon=ft.Icons.UPDATE,
-                                             on_click=on_check_updates)],
+                ft.Row([check_updates_btn],
                        alignment=ft.MainAxisAlignment.START),
             ], icon=ft.Icons.INFO,
                 subtitle="Version, engine and updater."),
             ft.Row([ft.OutlinedButton("Reset to Defaults", icon=ft.Icons.RESTORE,
                                       on_click=on_reset)],
                    alignment=ft.MainAxisAlignment.CENTER),
-        ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+        ], spacing=20, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ------------------------------------------------------------ deps page
     def deps_view(page: ft.Page):
         import flet as ft
-        col = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+        col = ft.Column(spacing=20, scroll=ft.ScrollMode.AUTO, expand=True)
         sys_txt = ft.Text(f"{platform.system()} {platform.release()} • Python {platform.python_version()}",
                           size=12, color=ft.Colors.ON_SURFACE_VARIANT)
 
@@ -1374,14 +1476,14 @@ def run_gui(port=None):
         """Phone/code/2FA dialogs. Returns True on success."""
         import flet as ft
         from telethon import errors as terr
-        phone_f = ft.TextField(label="Phone (+8801...) or bot token",
-                               helper="Bot tokens are secrets — they stay on this device.",
-                               autofocus=True, password=True, can_reveal_password=True,
+        phone_f = ft.TextField(label="Phone number or bot token",
+                               helper_text="Phone: +1 555... | Bot token: 123456:ABCdef...",
+                               autofocus=True,
                                prefix_icon=ft.Icons.PHONE if hasattr(ft.Icons, "PHONE") else None)
         dlg = ft.AlertDialog(title=ft.Text("Telegram login"),
                              content=phone_f,
                              actions=[ft.TextButton("Cancel"), ft.TextButton("Send code")])
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
 
         def _cancel(e):
             if not fut.done():
@@ -1410,7 +1512,7 @@ def run_gui(port=None):
             d = ft.AlertDialog(title=ft.Text("Enter the code we just sent"),
                                content=f,
                                actions=[ft.TextButton("Cancel"), ft.TextButton("OK")])
-            f4: asyncio.Future = asyncio.get_event_loop().create_future()
+            f4: asyncio.Future = asyncio.get_running_loop().create_future()
             d.actions[0].on_click = lambda e: (f4.set_result("") if not f4.done() else None, _hide_dlg(page, d))
 
             def _ok(e):
@@ -1461,7 +1563,7 @@ def run_gui(port=None):
             code_f = ft.TextField(label="Login code from Telegram")
             dlg2 = ft.AlertDialog(title=ft.Text("Enter code"), content=code_f,
                                   actions=[ft.TextButton("Cancel"), ft.TextButton("Confirm")])
-            fut2: asyncio.Future = asyncio.get_event_loop().create_future()
+            fut2: asyncio.Future = asyncio.get_running_loop().create_future()
             dlg2.actions[0].on_click = lambda e: (fut2.set_result(None) if not fut2.done() else None, _hide_dlg(page, dlg2))
 
             async def _c2(e):
@@ -1506,45 +1608,42 @@ def run_gui(port=None):
                 snack(page, "Wrong code, try again (attempt "
                       f"{_attempt + 2}/3).", error=True)
                 continue
+        # The loop broke out on SessionPasswordNeededError — fall through to 2FA.
         try:
-            await client.sign_in(phone=phone, code=code)
+            pw_f = ft.TextField(label="2FA password", password=True, can_reveal_password=True)
+            dlg3 = ft.AlertDialog(title=ft.Text("2-step verification"), content=pw_f,
+                                  actions=[ft.TextButton("Cancel"), ft.TextButton("Login")])
+            fut3: asyncio.Future = asyncio.get_running_loop().create_future()
+            dlg3.actions[0].on_click = lambda e: (fut3.set_result(None) if not fut3.done() else None, _hide_dlg(page, dlg3))
+
+            async def _c3(e):
+                if not fut3.done():
+                    fut3.set_result(pw_f.value)
+                _hide_dlg(page, dlg3)
+            dlg3.actions[1].on_click = _c3
+            _show_dlg(page, dlg3)
+            pw = await fut3
+            _wipe_field(pw_f)
+            if not pw:
+                return False
+            try:
+                await client.sign_in(password=pw)
+            finally:
+                try:
+                    del pw
+                except NameError:
+                    pass
+            try:
+                del phone
+            except NameError:
+                pass
+            try:
+                del code
+            except NameError:
+                pass
             harden_session_files()
             return True
-        except Exception as exc:
-            if isinstance(exc, terr.SessionPasswordNeededError):
-                pw_f = ft.TextField(label="2FA password", password=True)
-                dlg3 = ft.AlertDialog(title=ft.Text("2-step verification"), content=pw_f,
-                                      actions=[ft.TextButton("Cancel"), ft.TextButton("Login")])
-                fut3: asyncio.Future = asyncio.get_event_loop().create_future()
-                dlg3.actions[0].on_click = lambda e: (fut3.set_result(None) if not fut3.done() else None, _hide_dlg(page, dlg3))
-
-                async def _c3(e):
-                    if not fut3.done():
-                        fut3.set_result(pw_f.value)
-                    _hide_dlg(page, dlg3)
-                dlg3.actions[1].on_click = _c3
-                _show_dlg(page, dlg3)
-                pw = await fut3
-                _wipe_field(pw_f)
-                if not pw:
-                    return False
-                try:
-                    await client.sign_in(password=pw)
-                finally:
-                    try:
-                        del pw
-                    except NameError:
-                        pass
-                try:
-                    del phone
-                except NameError:
-                    pass
-                try:
-                    del code
-                except NameError:
-                    pass
-                harden_session_files()
-                return True
+        except Exception:
             snack(page, "Login failed.", error=True)
             return False
         finally:
@@ -1557,7 +1656,7 @@ def run_gui(port=None):
                              action: str = "Download",
                              icon=ft.Icons.DOWNLOAD) -> bool:
         import flet as ft
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
         dlg = ft.AlertDialog(title=ft.Text(title), content=ft.Text(body),
                              icon=ft.Icon(icon),
                              actions=[ft.TextButton("Cancel"), ft.FilledButton(action)])
@@ -1569,7 +1668,7 @@ def run_gui(port=None):
     async def update_dialog(page, info) -> str:
         """Update-available dialog. Returns 'later' | 'page' | 'download'."""
         import flet as ft
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
 
         def _pick(value: str):
             async def _go(e):
@@ -1596,29 +1695,93 @@ def run_gui(port=None):
         page.theme = ft.Theme(color_scheme_seed=SEED)
         page.dark_theme = ft.Theme(color_scheme_seed=SEED)
         page.padding = 0
+        page.window.min_width = 800
+        page.window.min_height = 600
         apply_theme(page, load_settings().theme)
-        body = ft.Container(expand=True, padding=24)
-        views = [downloads_view(page), queue_view(page), settings_view(page), deps_view(page)]
 
-        def on_nav(e):
-            body.content = views[rail.selected_index]
-            page.update()
-            if rail.selected_index == 1:
-                refresh_queue()
-            if rail.selected_index == 2:
-                refresh_settings_hint()
+        # Responsive body: max-width constraint + adaptive padding
+        body_content = ft.Container(expand=True)
+        body = ft.Container(
+            content=body_content,
+            expand=True,
+            max_width=1200,
+            alignment=ft.alignment.top_center,
+            padding=24,
+        )
+
+        views = [downloads_view(page), queue_view(page), settings_view(page)]
+
+        queue_nav_dest = ft.NavigationRailDestination(icon=ft.Icons.QUEUE, label="Queue")
+        queue_bar_dest = ft.NavigationBarDestination(icon=ft.Icons.QUEUE, label="Queue")
+        nav_destinations = [
+            ft.NavigationRailDestination(icon=ft.Icons.LINK, label="Add"),
+            queue_nav_dest,
+            ft.NavigationRailDestination(icon=ft.Icons.SETTINGS, label="Settings"),
+        ]
+        bar_destinations = [
+            ft.NavigationBarDestination(icon=ft.Icons.LINK, label="Add"),
+            queue_bar_dest,
+            ft.NavigationBarDestination(icon=ft.Icons.SETTINGS, label="Settings"),
+        ]
 
         rail = ft.NavigationRail(
             selected_index=0, label_type=ft.NavigationRailLabelType.ALL,
-            destinations=[ft.NavigationRailDestination(icon=ft.Icons.LINK, label="Add"),
-                          ft.NavigationRailDestination(icon=ft.Icons.QUEUE, label="Queue"),
-                          ft.NavigationRailDestination(icon=ft.Icons.SETTINGS, label="Settings"),
-                          ft.NavigationRailDestination(icon=ft.Icons.BUILD, label="Deps")],
-            on_change=on_nav)
+            destinations=nav_destinations)
+
+        bar = ft.NavigationBar(
+            selected_index=0,
+            destinations=bar_destinations)
+
+        # Store nav destinations so refresh_queue can update the badge.
+        queue_header_txt["rail_dest"] = queue_nav_dest
+        queue_header_txt["bar_dest"] = queue_bar_dest
+
+        def _set_selected_index(idx: int):
+            rail.selected_index = idx
+            bar.selected_index = idx
+
+        def on_nav(e):
+            idx = e.control.selected_index
+            _set_selected_index(idx)
+            body_content.content = views[idx]
+            page.update()
+            if idx == 1:
+                refresh_queue()
+            if idx == 2:
+                refresh_settings_hint()
+
+        rail.on_change = on_nav
+        bar.on_change = on_nav
+
+        # Responsive layout: rail for wide, bar for narrow
+        layout_row = ft.Row([rail, ft.VerticalDivider(width=1), body], expand=True)
+
+        def _apply_layout():
+            if page.width < 600:
+                # Narrow: hide rail, use bottom bar
+                layout_row.controls = [body]
+                page.bottom_bar = bar
+            else:
+                # Wide: use rail, no bottom bar
+                layout_row.controls = [rail, ft.VerticalDivider(width=1), body]
+                page.bottom_bar = None
+            # Responsive padding
+            if page.width < 600:
+                body.padding = 12
+            elif page.width < 900:
+                body.padding = 16
+            else:
+                body.padding = 24
+
+        def on_resize(e):
+            _apply_layout()
+            page.update()
+
+        page.on_resize = on_resize
 
         def _goto(idx: int):
-            rail.selected_index = idx
-            body.content = views[idx]
+            _set_selected_index(idx)
+            body_content.content = views[idx]
             page.update()
             if idx == 1:
                 refresh_queue()
@@ -1629,9 +1792,10 @@ def run_gui(port=None):
         # First-run nudge: open Settings when API/folder missing.
         st0 = load_settings()
         start_idx = 2 if (not st0.api_id or not st0.api_hash or not st0.download_dir) else 0
-        rail.selected_index = start_idx
-        body.content = views[start_idx]
-        page.add(ft.Row([rail, ft.VerticalDivider(width=1), body], expand=True))
+        _set_selected_index(start_idx)
+        body_content.content = views[start_idx]
+        _apply_layout()
+        page.add(layout_row)
 
     import flet as ft
     if port:

@@ -98,7 +98,12 @@ def probe_codecs(input_path: Path) -> Tuple[Optional[str], Optional[str]]:
 
 def ffprobe_has_video(path: Path) -> bool:
     exe = _bin("ffprobe")
-    if not path.exists() or path.stat().st_size <= 0 or not exe:
+    if not path.exists() or not exe:
+        return False
+    try:
+        if path.stat().st_size <= 0:
+            return False
+    except OSError:
         return False
     try:
         r = subprocess.run(
@@ -133,7 +138,7 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
     except OSError as exc:
         raise RuntimeError(f"Cannot validate ffmpeg output path: {exc}") from exc
     video_codec, audio_codec = probe_codecs(input_path)
-    can_remux = video_codec == "h264" and (audio_codec in {None, "aac"})
+    can_remux = video_codec is not None and video_codec == "h264" and (audio_codec in {None, "aac"})
     if can_remux:
         cmd = [exe, "-hide_banner", "-loglevel", "error", "-y",
                "-i", str(input_path), "-map", "0:v:0?", "-map", "0:a:0?",

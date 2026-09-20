@@ -95,7 +95,7 @@ async def download_resumable(client, message: Message, destination: Path,
         return False
 
     if _any_symlink_in_chain(destination) or _any_symlink_in_chain(destination.parent):
-        raise DownloadError("Refusing to write through a symlink.")
+        raise DownloadError("Cannot save here: the folder path is not safe.")
     # mkdir -p without following symlinks. No permissive fallback: if the
     # safe mkdir refuses (symlink plant) or fails, abort rather than
     # following the link with a plain mkdir.
@@ -109,13 +109,13 @@ async def download_resumable(client, message: Message, destination: Path,
     # resolve() to escape; re-verify.
     try:
         if _any_symlink_in_chain(destination.parent):
-            raise DownloadError("Refusing to write through a symlink.")
+            raise DownloadError("Cannot save here: the folder path is not safe.")
     except DownloadError:
         raise
     except OSError:
         pass
     if destination.is_symlink():
-        raise DownloadError("Refusing to write through a symlink.")
+        raise DownloadError("Cannot save here: the folder path is not safe.")
     if total > MAX_FILE_BYTES:
         raise DownloadError(
             f"Refusing to download {total} bytes (over the {MAX_FILE_BYTES} cap).")
@@ -129,7 +129,7 @@ async def download_resumable(client, message: Message, destination: Path,
         pass
     if destination.exists():
         if destination.is_symlink():
-            destination.unlink()
+            raise DownloadError("Cannot save here: the folder path is not safe.")
         elif not destination.is_file():
             raise DownloadError("Destination exists but is not a regular file.")
     existing = destination.stat().st_size if destination.exists() else 0
@@ -191,11 +191,13 @@ async def download_resumable(client, message: Message, destination: Path,
         # not leave a 0-byte placeholder file behind.
         raise Cancelled(f"Cancelled before download started; nothing written to {destination}.")
     try:
+        if not nofollow and destination.is_symlink():
+            raise DownloadError(f"Cannot save here: the folder path is not safe at {destination}.")
         fd = _os.open(destination, flags, 0o600)
     except OSError as exc:
         import errno as _errno
         if exc.errno == _errno.ELOOP:
-            raise DownloadError(f"Refusing to write through a symlink at {destination}.") from exc
+            raise DownloadError(f"Cannot save here: the folder path is not safe at {destination}.") from exc
         raise DownloadError(f"Could not open {destination}: {exc}") from exc
     try:
         try:
@@ -213,6 +215,7 @@ async def download_resumable(client, message: Message, destination: Path,
                     f"Could not reset suspicious partial {destination}: {exc}") from exc
             current = 0
 
+        _os.lseek(fd, current, _os.SEEK_SET)
         while current < total:
             if cancel is not None and cancel.is_set():
                 raise Cancelled(f"Cancelled at {current}/{total} bytes; partial file kept.")
@@ -269,7 +272,10 @@ async def download_resumable(client, message: Message, destination: Path,
                         f"Telegram rate-limit repeated {flood_waits} times; aborting. "
                         f"Partial file kept at:\n{destination}"
                     ) from exc
-                secs = int(exc.seconds)
+                try:
+                    secs = int(exc.seconds)
+                except (TypeError, ValueError):
+                    secs = 0
                 if secs > MAX_FLOODWAIT_SECONDS:
                     raise DownloadError(
                         f"Telegram rate-limit is {secs}s — too long to wait. "

@@ -119,7 +119,7 @@ async def test_symlink_dest_refused(monkeypatch, tmp_path):
     link = tmp_path / "link.bin"
     link.symlink_to(real)
     monkeypatch.setattr(dl.utils, "get_input_location", lambda m: (1, "loc"))
-    with pytest.raises(DownloadError, match="symlink"):
+    with pytest.raises(DownloadError, match="not safe"):
         await download_resumable(_FakeClient(b"xx"), _msg(2), link)
 
 

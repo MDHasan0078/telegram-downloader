@@ -36,8 +36,7 @@ def _sanitize_display(s: str, limit: int = 500) -> str:
         s = str(s)
     # \x1b is ESC, \x00-\x1f cover \r\n etc.; safe_filename does this for
     # filenames but display paths (titles/urls/errors) need the same.
-    import re as _re
-    s = _re.sub(r"[\x00-\x1f\x7f]", "?", s)
+    s = re.sub(r"[\x00-\x1f\x7f]", "?", s)
     if len(s) > limit:
         s = s[:limit]
     return s
@@ -73,7 +72,7 @@ def _base_config_dir() -> Path:
 def _refuse_config_symlink() -> None:
     """Abort if CONFIG_DIR itself is a symlink (parent hijack)."""
     try:
-        if CONFIG_DIR.is_symlink() or CONFIG_DIR.resolve() != CONFIG_DIR.absolute().resolve() and CONFIG_DIR.exists() and CONFIG_DIR.resolve().is_symlink():
+        if (CONFIG_DIR.is_symlink()) or ((CONFIG_DIR.resolve() != CONFIG_DIR.absolute().resolve()) and (CONFIG_DIR.exists()) and (CONFIG_DIR.resolve().is_symlink())):
             raise RuntimeError(f"Refusing config dir that is a symlink: {CONFIG_DIR}")
         # Check that no parent component is a symlink (e.g. ~/.config -> /tmp/evil)
         cur: Path | None = CONFIG_DIR.absolute()
@@ -442,7 +441,10 @@ def load_settings() -> Settings:
                     LEGACY_CONFIG.unlink()
             except OSError:
                 pass
-            data = _read_json_nofollow(CONFIG_JSON) if CONFIG_JSON.exists() else data
+            try:
+                data = _read_json_nofollow(CONFIG_JSON) if CONFIG_JSON.exists() else data
+            except OSError:
+                pass
 
     s = Settings(
         api_id=str(data.get("api_id")) if data.get("api_id") else None,
@@ -576,7 +578,7 @@ def ensure_download_dir(s: Settings) -> Path:
         while cur is not None and cur != cur.parent:
             try:
                 if cur.is_symlink():
-                    raise ValueError(f"Refusing download folder that traverses a symlink: {target}")
+                    raise ValueError(f"Cannot use this folder: the path contains a link that isn't allowed: {target}")
             except ValueError:
                 raise
             except OSError:
@@ -594,7 +596,7 @@ def ensure_download_dir(s: Settings) -> Path:
         # A config inside the download (e.g. HOME) is not a file-overlap risk.
         if tgt_res == cfg or cfg in tgt_res.parents:
             raise ValueError(
-                f"Refusing download folder inside the config dir: {target}")
+                f"Cannot use this folder: it overlaps with the app's settings folder: {target}")
         if len(tgt_res.parts) <= 1:
             raise ValueError("Refusing download folder at filesystem root.")
         if tgt_res != tgt and tgt_res.is_symlink():
@@ -640,13 +642,13 @@ def ensure_download_dir(s: Settings) -> Path:
     try:
         cur = target.resolve()
         if cur != target.absolute().resolve() and target.resolve().is_symlink():
-            raise ValueError(f"Refusing download folder that traverses a symlink: {target}")
+            raise ValueError(f"Cannot use this folder: the path contains a link that isn't allowed: {target}")
         # Verify no ancestor of the *resolved* path is a link (covers linkparent).
         anc: Path | None = target.absolute()
         while anc is not None and anc != anc.parent:
             try:
                 if anc.is_symlink():
-                    raise ValueError(f"Refusing download folder that traverses a symlink: {target}")
+                    raise ValueError(f"Cannot use this folder: the path contains a link that isn't allowed: {target}")
             except ValueError:
                 raise
             except OSError:

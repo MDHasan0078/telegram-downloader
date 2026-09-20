@@ -14,7 +14,7 @@ if [ -f wheels/SHA256SUMS ]; then
     exit 1
   }
 fi
-pip install -U "flet[all]==0.86.5" 2>&1 | tail -2
+pip install -U "flet[all]==0.86.5"
 if [ "${1:-}" = "--debug" ]; then
   flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args=--debug --yes
 else

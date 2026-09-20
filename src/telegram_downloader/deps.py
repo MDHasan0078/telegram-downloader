@@ -28,6 +28,7 @@ class DepStatus:
     install_macos: str = ""
     install_windows: str = ""
     install_android: str = ""
+    required: bool = False
 
     def install_for_current_os(self) -> str:
         sysname = platform.system().lower()
@@ -100,6 +101,7 @@ def check_all() -> list[DepStatus]:
         install_macos="pip install -U telethon",
         install_windows="pip install -U telethon",
         install_android="pip install -U telethon",
+        required=True,
     ))
 
     # cryptg (optional speed-up)
@@ -129,4 +131,4 @@ def check_all() -> list[DepStatus]:
 
 
 def missing_required() -> list[DepStatus]:
-    return [d for d in check_all() if d.name.startswith("telethon") and not d.ok]
+    return [d for d in check_all() if d.required and not d.ok]

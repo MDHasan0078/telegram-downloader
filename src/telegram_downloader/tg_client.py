@@ -74,7 +74,7 @@ async def fetch_preview(client: TelegramClient, url: str) -> Preview:
             message = await asyncio.wait_for(client.get_messages(chat, ids=message_id),
                                              timeout=120)
         except errors.FloodWaitError as exc:
-            await asyncio.sleep(min(int(exc.seconds) + 1, 60))
+            await asyncio.sleep(min(int(exc.seconds) + 1, 300))
             try:
                 message = await asyncio.wait_for(client.get_messages(chat, ids=message_id),
                                                  timeout=120)

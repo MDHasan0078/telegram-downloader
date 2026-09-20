@@ -14,6 +14,7 @@ download_asset() verifies before returning the installer path.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import subprocess
@@ -68,7 +69,7 @@ class UpdateInfo:
         """
         if operating_system is None:
             operating_system = platform.system().lower()
-            if operating_system == "linux" and "com.termux" in __import__("os").environ.get("PREFIX", ""):
+            if operating_system == "linux" and "com.termux" in os.environ.get("PREFIX", ""):
                 operating_system = "android"
         if operating_system in ("darwin", "macos"):
             versioned = {f"telegram-downloader_{self.latest_version}.dmg"}
@@ -171,7 +172,7 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
     if repo != REPO:
         return None
     if token is None:
-        token = __import__("os").environ.get("GITHUB_TOKEN") or ""
+        token = os.environ.get("GITHUB_TOKEN") or ""
     try:
         headers: dict[str, str] = {
             "User-Agent": "telegram-downloader",
@@ -277,7 +278,7 @@ def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30,
     if len(body) > MAX_CHECKSUM_BYTES:
         raise ValueError("Checksum file too large; refusing.")
     out: dict[str, str] = {}
-    for line in body.decode("utf-8", errors="replace").splitlines():
+    for line in body.decode("utf-8", errors="strict").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -363,7 +364,7 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
     from .config import harden_private_file as _harden
     from .telegram_utils import safe_filename
     if token is None:
-        token = __import__("os").environ.get("GITHUB_TOKEN") or ""
+        token = os.environ.get("GITHUB_TOKEN") or ""
     if not _https_url_ok(asset.url, ASSET_HOSTS):
         raise ValueError(f"Refusing to download from untrusted URL: {asset.url!r}")
     if not _ASSET_NAME_RE.match(asset.name or ""):
@@ -388,8 +389,10 @@ def download_asset(asset: UpdateAsset, dest_dir, tag_version: str | None = None,
             raise ValueError("Refusing to write through symlink tmp file.")
     except OSError:
         pass
-    req = urllib.request.Request(asset.url, headers={"User-Agent": "telegram-downloader",
-                                                        "Authorization": f"Bearer {token}" if token else "telegram-downloader"})
+    req = urllib.request.Request(asset.url, headers={
+        "User-Agent": "telegram-downloader",
+        **({"Authorization": f"Bearer {token}"} if token else {}),
+    })
     total = 0
     import time as _time
     deadline = _time.monotonic() + 3600  # hard stop for a slow/hung CDN stream

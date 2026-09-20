@@ -48,6 +48,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: cd dist && sha256sum *.deb > SHA256SUMS-deb
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: deb
           path: |
@@ -91,6 +92,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: cd build/apk && sha256sum *.apk > SHA256SUMS-apk
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: apk
           path: |
@@ -132,6 +134,7 @@ jobs:
         # the Linux release job verifies these checksums.
         run: cd dist && shasum -a 256 *.dmg > SHA256SUMS-dmg
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: macos
           path: |
