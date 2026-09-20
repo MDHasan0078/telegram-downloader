@@ -31,6 +31,8 @@ from .downloader import Cancelled, download_resumable
 from .queue_store import DownloadItem, QueueStore
 from .telegram_utils import format_bytes, safe_filename, split_urls
 
+import re as _re_module
+
 SEED = "#6750A4"
 MODE_LABELS = {"1": "Original", "2": "Fast", "3": "Max"}
 
@@ -272,17 +274,12 @@ def run_gui(port=None):
         url_count_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
 
         def _on_url_change(e):
-            import re
             text = url_box.value or ""
-            urls = re.findall(r'https?://t\.me/\S+', text)
+            urls = _re_module.findall(r'https?://t\.me/\S+', text)
             n = len(urls)
             url_count_txt.value = f"{n} URL{'s' if n != 1 else ''} detected" if n else ""
             url_box.helper_text = (url_count_txt.value
                                    if n else "Nothing downloads until you confirm below.")
-            try:
-                page.update()
-            except Exception:
-                pass
 
         url_box = ft.TextField(label="Telegram link(s)",
                                hint_text="https://t.me/channel/123 (one per line)",
@@ -1755,8 +1752,30 @@ def run_gui(port=None):
         # Responsive layout: rail for wide, bar for narrow
         layout_row = ft.Row([rail, ft.VerticalDivider(width=1), body], expand=True)
 
+        _last_layout_mode = {"mode": None}
+        
         def _apply_layout():
+            # Determine layout mode
             if page.width < 600:
+                mode = "narrow"
+                padding = 12
+            elif page.width < 900:
+                mode = "medium"
+                padding = 16
+            else:
+                mode = "wide"
+                padding = 24
+            
+            # Only update if mode changed or first run
+            if _last_layout_mode["mode"] == mode:
+                # Just update padding if needed
+                if body.padding != padding:
+                    body.padding = padding
+                return
+            
+            _last_layout_mode["mode"] = mode
+            
+            if mode == "narrow":
                 # Narrow: hide rail, use bottom bar
                 layout_row.controls = [body]
                 page.bottom_bar = bar
@@ -1764,13 +1783,8 @@ def run_gui(port=None):
                 # Wide: use rail, no bottom bar
                 layout_row.controls = [rail, ft.VerticalDivider(width=1), body]
                 page.bottom_bar = None
-            # Responsive padding
-            if page.width < 600:
-                body.padding = 12
-            elif page.width < 900:
-                body.padding = 16
-            else:
-                body.padding = 24
+            
+            body.padding = padding
 
         def on_resize(e):
             _apply_layout()
