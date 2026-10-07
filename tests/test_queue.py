@@ -186,10 +186,29 @@ def test_added_at_nonfinite_and_negative_clamped(tmp_path):
 
 
 def test_load_nonfinite_number_backs_up(tmp_path):
-    # JSON NaN/Infinity must be rejected at parse time (parse_constant),
-    # not persisted as floats that poison comparisons/formatting.
+    # A non-finite literal in ONE field must not discard the whole queue.
+    # parse_constant used to raise, which routed the entire file into the
+    # "corrupt" handler and silently dropped every unrelated item.
     p = tmp_path / "q.json"
-    p.write_text('[{"url": "http://x", "title": "t", "added_at": NaN}]')
+    p.write_text('[{"url": "http://a", "title": "t1", "added_at": NaN},'
+                 ' {"url": "http://b", "title": "t2", "size": 5}]')
     store = QueueStore(path=p)
-    assert store.items == []
-    assert list(tmp_path.glob("q.json.corrupt-*.bak"))
+    assert len(store.items) == 2, "one poisoned field discarded the queue"
+    assert store.items[0].added_at == 0.0, "non-finite value not sanitized"
+    assert store.items[1].size == 5
+    # No .corrupt backup: the file was readable and must be left in place.
+    assert not list(tmp_path.glob("q.json.corrupt-*.bak"))
+
+
+def test_load_nonfinite_size_does_not_crash(tmp_path):
+    # 1e+400 parses to inf without tripping parse_constant, so it reaches
+    # int(inf) -- an OverflowError, which is NOT a ValueError and used to
+    # escape every handler and crash startup.
+    p = tmp_path / "q.json"
+    p.write_text('[{"url": "http://a", "size": 1e+400},'
+                 ' {"url": "http://b", "size": 7}]')
+    store = QueueStore(path=p)
+    assert len(store.items) == 2
+    assert store.items[0].size == 0
+    assert store.items[1].size == 7
+    assert not list(tmp_path.glob("q.json.corrupt-*.bak"))

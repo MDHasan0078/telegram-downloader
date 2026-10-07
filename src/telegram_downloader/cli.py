@@ -420,9 +420,13 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
         # has no resume command, so dedupe against what's already queued so
         # a rerun doesn't silently append duplicate rows.
         store = QueueStore()
-        existing = {i.url for i in store.items}
-        fresh = [p for p in ok if p.url not in existing]
-        if existing and fresh:
+        # Dedupe only against rows that are still active. Filtering against
+        # *all* rows meant re-requesting a URL that had already completed
+        # downloaded nothing, printed success and exited 0.
+        active = {i.url for i in store.items
+                  if i.status in ("queued", "downloading", "converting", "fetching")}
+        fresh = [p for p in ok if p.url not in active]
+        if active and fresh:
             print(f"Skipping {len(ok) - len(fresh)} URL(s) already in the queue.")
         added = store.extend([DownloadItem(url=p.url, title=p.title,
                                            ext=p.ext, size=p.size,
@@ -431,6 +435,7 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
             print("All URLs are already queued — nothing new to download.")
             return 0
         fails = 0
+        cancels = 0
         for item in added:
             try:
                 store.update(item.id, status="downloading")
@@ -438,6 +443,10 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
                 store.update(item.id, status="done", progress=100.0, dest=str(final))
                 print(f"\nSaved: {_sanitize_display(str(final))}")
             except Cancelled as exc:
+                # Cancelled is a RuntimeError subclass, so it was caught by
+                # the branch above and never counted: a Ctrl-C'd batch
+                # reported "N ok" and exited 0.
+                cancels += 1
                 store.update(item.id, status="cancelled",
                              error=_sanitize_display(str(exc)))
                 print(f"\n{_sanitize_display(exc)}")
@@ -446,9 +455,12 @@ async def cmd_download(urls: list[str], mode: str, yes: bool, out_dir_s: str = "
                 store.update(item.id, status="error",
                              error=_sanitize_display(str(exc)))
                 print(f"\nFailed {_sanitize_display(item.url)}: {_sanitize_display(exc)}")
-        print(f"\nDone: {len(added)-fails} ok, {fails} failed. "
+        ok_count = len(added) - fails - cancels
+        print(f"\nDone: {ok_count} ok, {fails} failed, {cancels} cancelled. "
               "Queue saved — use the GUI's Resume all to retry later.")
-        return 1 if fails else 0
+        if cancels and not fails:
+            return 130  # conventional SIGINT status
+        return 1 if (fails or cancels) else 0
     finally:
         await client.disconnect()
 

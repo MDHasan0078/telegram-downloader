@@ -3,12 +3,35 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      sign:
+        description: >-
+          Sign artifacts with the release keys, but only for the platforms whose
+          secrets are configured (GPG for the .deb checksums, Developer ID for
+          the .dmg, upload keystore for the .apk). Skipped silently when the
+          secret is absent so forks build unsigned.
+        type: boolean
+        default: true
+      notarize:
+        description: >-
+          Additionally submit the .dmg to Apple's notary service and staple the
+          ticket. Requires APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+          APPLE_TEAM_ID in addition to the Developer ID certificate.
+        type: boolean
+        default: true
 
-# One release pipeline at a time: a retagged/force-pushed v* must not race
-# the previous run's artifact rename + release attach.
+# One release pipeline at a time, across ALL tags: a retagged/force-pushed v*
+# must not race the previous run's artifact rename + release attach. The old
+# `build-${{ github.ref }}` group gave every tag its own lane, so v1.3.0 and
+# v1.3.1 published concurrently and clobbered each other's assets — the exact
+# race the comment here claims to prevent.
+#
+# cancel-in-progress is deliberately FALSE. Cancelling mid-publish is how you
+# end up with a release that has the .deb attached but no checksum manifest (or
+# vice versa). Runs queue instead; the publish step is also idempotent.
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-release
+  cancel-in-progress: false
 
 # Least privilege: builds only READ; only the single release job (that
 # touches the GitHub Release) elevates to contents: write.
@@ -16,19 +39,45 @@ permissions:
   contents: read
 
 jobs:
+  # -------------------------------------------------------------------- test
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # persist-credentials: false — otherwise checkout writes a live
+      # GITHUB_TOKEN into .git/config, where any code that runs later in this
+      # directory (a build backend, a setup.py) can read it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[test]" && python -m pytest -q
+      - name: Verify vendored wheels
+        run: ( cd wheels && sha256sum -c --quiet SHA256SUMS )
+      # pyaes is sdist-only on PyPI, so the runtime closure is installed from
+      # the vendored wheels with --no-index: nothing here can be swapped by
+      # whoever next publishes to PyPI.
+      - run: >-
+          pip install --no-index --find-links wheels
+          --require-hashes --only-binary :all: -r requirements-runtime.lock
+      # Build/test tooling comes from PyPI but is hash-pinned too.
+      - run: >-
+          pip install --require-hashes --only-binary :all: -r requirements-build.lock
+      # --no-build-isolation: the backend is the pinned setuptools installed
+      # above, not one pip downloads and executes at this point.
+      - run: pip install --no-build-isolation --no-deps -e . && python -m pytest -q
 
+  # --------------------------------------------------------------------- deb
   deb:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # This job has the widest install base (every Debian/Ubuntu user), so it
+      # must not build against whatever python ubuntu-latest happens to ship.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
       - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -37,6 +86,11 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
           grep -E "^version = \"$VERSION\"$" pyproject.toml
+      # Archive members are otherwise stamped with wall-clock time, so two
+      # builds of one commit disagree bit-for-bit and no published checksum
+      # means anything. Bind it to the commit time.
+      - name: Pin build timestamps
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
       - run: chmod +x scripts/build-deb.sh && ./scripts/build-deb.sh
       - name: Smoke test .deb contents
         run: |
@@ -44,22 +98,47 @@ jobs:
           [ "${#DEB[@]}" -eq 1 ] || { echo "expected exactly 1 .deb, found ${#DEB[@]}"; exit 1; }
           dpkg-deb -f "$DEB" Package Version Architecture Depends
           dpkg-deb -c "$DEB" | grep -E "(usr/bin/tg-dl|opt/telegram-downloader)" | head -5
-      - name: Checksums
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: cd dist && sha256sum *.deb > SHA256SUMS-deb
-      - uses: actions/upload-artifact@v4
+      # The .deb must be able to install itself with the network unplugged.
+      # If the vendored wheel set is incomplete, run.sh would fall back to
+      # PyPI at the end user's first launch — prove here that it cannot.
+      - name: Prove the .deb installs offline
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/offline-probe"
+          rm -rf "$WORK"; mkdir -p "$WORK"
+          dpkg-deb -x dist/*.deb "$WORK/root"
+          sed "s#^APP=/opt/telegram-downloader#APP=$WORK/root/opt/telegram-downloader#" \
+            "$WORK/root/opt/telegram-downloader/run.sh" > "$WORK/run.sh"
+          chmod +x "$WORK/run.sh"
+          # Best isolation available: a network namespace with no interfaces.
+          # Fall back to a dead proxy if the runner forbids user namespaces.
+          if unshare -rn true 2>/dev/null; then
+            ISOLATE=(unshare -rn)
+          else
+            export http_proxy=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 all_proxy=http://127.0.0.1:1
+            ISOLATE=()
+          fi
+          "${ISOLATE[@]}" env HOME="$WORK/home" \
+            XDG_DATA_HOME="$WORK/home/.local/share" "$WORK/run.sh" --version
+          rm -rf "$WORK"
+      # Checksums are generated in the `release` job, not here: this job both
+      # produces the artifact and signs the statement about it, which binds the
+      # checksum to nothing.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: deb
           path: |
             dist/*.deb
-            dist/SHA256SUMS-deb
 
+  # --------------------------------------------------------------------- apk
   apk:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -68,42 +147,75 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
           grep -E "^version = \"$VERSION\"$" pyproject.toml
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with: { distribution: temurin, java-version: "17" }
-      - run: pip install "flet[all]==0.86.5" && flet doctor || true
-      - name: Accept Android SDK licenses
+      - name: Pin build timestamps
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+      # build-apk.sh installs Flet itself from requirements-flet.lock with
+      # --require-hashes and refuses to run on an interpreter the lock does not
+      # cover. Flet writes to build/apk; the script relocates it to dist/apk so
+      # `build/` stays purely setuptools' staging area.
+      - name: Detect signing secrets
+        env:
+          SIGN: ${{ inputs.sign }}
+          K: ${{ secrets.APK_KEYSTORE_BASE64 }}
         run: |
-          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            || { echo "cmdline-tools sdkmanager missing at $ANDROID_HOME"; exit 1; }
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          if [ "$SIGN" != "false" ] && [ -n "${K:-}" ]; then
+            echo "HAS_APK_KEY=true" >> "$GITHUB_ENV"
+          else
+            echo "no APK upload key configured; shipping an unsigned .apk" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh
       - name: Rename APK to versioned release name
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          ls -R build
-          APK=(build/apk/*.apk)
+          ls -R dist
+          APK=(dist/apk/*.apk)
           [ "${#APK[@]}" -eq 1 ] || { echo "expected exactly 1 APK, found ${#APK[@]}"; exit 1; }
-          mv "$APK" "build/apk/telegram-downloader_${VERSION}.apk"
-          ls -la build/apk/
-      - name: Checksums
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: cd build/apk && sha256sum *.apk > SHA256SUMS-apk
-      - uses: actions/upload-artifact@v4
+          mv "$APK" "dist/apk/telegram-downloader_${VERSION}.apk"
+          ls -la dist/apk/
+      # Unsigned APKs are installable but Android shows no provenance at all.
+      # Best-effort: skip cleanly on forks, which have no keystore.
+      - name: Sign APK
+        if: env.HAS_APK_KEY == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+          APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
+          APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          echo "using build-tools $(basename "$BT")"
+          printf '%s' "$APK_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          APK=(dist/apk/*.apk)
+          "$BT/zipalign" -p -f 4 "${APK[0]}" "${APK[0]}.aligned"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/upload.jks" \
+            --ks-key-alias "$APK_KEY_ALIAS" \
+            --ks-pass "env:APK_KEYSTORE_PASSWORD" \
+            --key-pass "env:APK_KEY_PASSWORD" \
+            --out "${APK[0]}" "${APK[0]}.aligned"
+          rm -f "${APK[0]}.aligned" "$RUNNER_TEMP/upload.jks"
+          "$BT/apksigner" verify --verbose --print-certs "${APK[0]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: apk
           path: |
-            build/apk/*.apk
-            build/apk/SHA256SUMS-apk
+            dist/apk/*.apk
 
+  # --------------------------------------------------------------------- dmg
   dmg:
     needs: test
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -112,40 +224,107 @@ jobs:
           sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i '' "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
           grep -E "^version = \"$VERSION\"$" pyproject.toml
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
-      - run: brew install create-dmg
-      - run: pip install "flet[all]==0.86.5" && chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
+      - name: Pin build timestamps
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+      # create-dmg ships no release artifacts and `brew install create-dmg`
+      # tracks whatever the formula says today, so the tool that builds the
+      # .dmg was floating. Fetch one pinned commit and verify its bytes.
+      - name: Install pinned create-dmg
+        run: |
+          set -euo pipefail
+          CREATE_DMG_SHA=bb9ea3194e55f2f76a821e87541513748d0fedc69f45cf4f0951cad15ae0cae5
+          CREATE_DMG_COMMIT=a2b71d0fda6d0df2a86dc7f67082d4d73e84c59f
+          curl -fsSL "https://raw.githubusercontent.com/create-dmg/create-dmg/$CREATE_DMG_COMMIT/create-dmg" \
+            -o "$RUNNER_TEMP/create-dmg"
+          echo "$CREATE_DMG_SHA  $RUNNER_TEMP/create-dmg" | shasum -a 256 -c -
+          chmod +x "$RUNNER_TEMP/create-dmg"
+          sudo install -m 0755 "$RUNNER_TEMP/create-dmg" /usr/local/bin/create-dmg
+          create-dmg --version || true
+      - name: Detect signing secrets
+        env:
+          SIGN: ${{ inputs.sign }}
+          CERT: ${{ secrets.APPLE_CODESIGN_CERT_P12_BASE64 }}
+          NOTARIZE: ${{ inputs.notarize }}
+          APPLE_ID_S: ${{ secrets.APPLE_ID }}
+        run: |
+          if [ "$SIGN" != "false" ] && [ -n "${CERT:-}" ]; then
+            echo "HAS_CODESIGN=true" >> "$GITHUB_ENV"
+          else
+            echo "no Developer ID certificate; .dmg will be un-notarized" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$NOTARIZE" != "false" ] && [ -n "${APPLE_ID_S:-}" ]; then
+            echo "HAS_NOTARY=true" >> "$GITHUB_ENV"
+          fi
+      # build-dmg.sh installs Flet from requirements-flet.lock with
+      # --require-hashes; Flet's build/macos output is moved to dist/macos.
+      - run: chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
+      # An un-notarized .dmg is quarantined by Gatekeeper, which teaches users
+      # to click through the OS's own integrity control — the one defence that
+      # still works when the release account is compromised. Best-effort.
+      - name: Codesign app bundle
+        if: env.HAS_CODESIGN == 'true'
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_CODESIGN_CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_CODESIGN_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APP=(dist/macos/*.app)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          printf '%s' "$CERT_P12_BASE64" | base64 -d --infile=- > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain \
+            -P "$CERT_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain-db
+          IDENTITY="$(security find-identity -v -p codesigning | sed -n 's/.*"\(.*\)"/\1/p' | head -1)"
+          test -n "$IDENTITY" || { echo "no codesigning identity in keychain"; exit 1; }
+          codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "${APP[0]}"
+          codesign --verify --deep --strict --verbose=2 "${APP[0]}"
+          rm -f "$RUNNER_TEMP/cert.p12"
       - name: Package versioned .dmg
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
-          chmod +x scripts/build-dmg.sh
-          APP=(build/macos/*.app)
-          test -d "$APP" || { echo "no .app bundle in build/macos"; ls -R build; exit 1; }
-          mkdir -p dist
+          APP=(dist/macos/*.app)
+          test -d "${APP[0]}" || { echo "no .app bundle in dist/macos"; ls -R dist; exit 1; }
           create-dmg --volname "Telegram Downloader" \
-            "dist/telegram-downloader_${VERSION}.dmg" "$APP"
+            "dist/telegram-downloader_${VERSION}.dmg" "${APP[0]}"
           ls -la dist/
-      - name: Checksums
-        if: startsWith(github.ref, 'refs/tags/v')
-        # sha256sum is absent on stock macOS; use shasum (BSD coreutils).
-        # Its 2-space output is identical in format, so `sha256sum -c` on
-        # the Linux release job verifies these checksums.
-        run: cd dist && shasum -a 256 *.dmg > SHA256SUMS-dmg
-      - uses: actions/upload-artifact@v4
+      - name: Notarize and staple .dmg
+        if: env.HAS_NOTARY == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          DMG="dist/telegram-downloader_${VERSION}.dmg"
+          xcrun notarytool store-credentials tgd-notary \
+            --apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$NOTARY_TEAM_ID"
+          xcrun notarytool submit "$DMG" --keychain-profile tgd-notary --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -v "$DMG"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: macos
           path: |
             dist/*.dmg
-            dist/SHA256SUMS-dmg
 
-  # Single release job: the three build jobs upload their artifacts + their
-  # own per-platform checksum files; this job verifies them and attaches
-  # everything to the tag in ONE step. Previously each job called
-  # softprops/action-gh-release concurrently, which raced on creating the
-  # release (422) and produced duplicate release notes.
+  # ----------------------------------------------------------------- release
+  # Single release job: the three build jobs upload their artifacts; this job
+  # downloads them, computes the checksums, and attaches everything to the tag
+  # in ONE step. Previously each job called softprops/action-gh-release
+  # concurrently, which raced on creating the release (422) and produced
+  # duplicate release notes.
   release:
     needs: [deb, apk, dmg]
     if: startsWith(github.ref, 'refs/tags/v')
@@ -153,44 +332,111 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: deb, path: deb }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: apk, path: apk }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: macos, path: macos }
-      - name: Verify checksums and filenames
+      - name: Verify artifact names
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "release ${VERSION} contents:"
           ls -la deb apk macos
-          # Exactly one of each installer + one checksum file per platform.
+          # Exactly one installer per platform.
           [ "$(ls deb/*.deb 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing deb"; exit 1; }
           [ "$(ls apk/*.apk 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing apk"; exit 1; }
           [ "$(ls macos/*.dmg 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing dmg"; exit 1; }
-          for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
-            [ -f "$f" ] || { echo "missing checksum file $f"; exit 1; }
-          done
           # Names must be the exact versioned release names the updater expects.
           [ -f "deb/telegram-downloader_${VERSION}_amd64.deb" ] || { echo "unexpected deb filename"; ls -1 deb; exit 1; }
           [ -f "apk/telegram-downloader_${VERSION}.apk" ] || { echo "unexpected apk filename"; ls -1 apk; exit 1; }
           [ -f "macos/telegram-downloader_${VERSION}.dmg" ] || { echo "unexpected dmg filename"; ls -1 macos; exit 1; }
-          # Checksums were generated on each platform; `sha256sum -c`
-          # validates them here (macOS shasum -a 256 output is compatible).
-          ( cd deb && sha256sum -c SHA256SUMS-deb )
-          ( cd apk && sha256sum -c SHA256SUMS-apk )
-          ( cd macos && sha256sum -c SHA256SUMS-dmg )
+# Checksums are computed HERE, not in the jobs that built the artifacts.
+      # This job has no checkout, no compiler and no source: it can only
+      # download what the build jobs uploaded. A checksum produced by the same
+      # process that produced the file proves nothing; this at least proves the
+      # published bytes are the bytes that were uploaded. (The .dmg's checksum
+      # used to have to be made on the macOS runner because stock macOS has no
+      # sha256sum; the release job is linux, so all three are computed here.)
+      - name: Compute and sign checksum manifests
+        env:
+          SIGN: ${{ inputs.sign }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          ( cd deb   && sha256sum *.deb > SHA256SUMS-deb )
+          ( cd apk   && sha256sum *.apk > SHA256SUMS-apk )
+          ( cd macos && sha256sum *.dmg > SHA256SUMS-dmg )
+          for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+            echo "--- $f"; cat "$f"
+            ( cd "$(dirname "$f")" && sha256sum -c "$(basename "$f")" )
+          done
+          if [ "$SIGN" != "false" ] && [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "HAS_SIGNING_KEY=true" >> "$GITHUB_ENV"
+            umask 077
+            LOCAL_ARGS=(--batch --yes --pinentry-mode loopback --passphrase-fd 3 --armor)
+            if [ -n "${GPG_KEY_ID:-}" ]; then
+              LOCAL_ARGS+=(--local-user "$GPG_KEY_ID")
+            fi
+            gpgconf --kill all || true
+            gpg --batch --quiet --import <<<"$GPG_PRIVATE_KEY"
+            for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+              gpg "${LOCAL_ARGS[@]}" --detach-sign --output "$f.asc" "$f" \
+                3<<<"${GPG_PASSPHRASE:-}"
+              gpg --batch --verify "$f.asc" "$f"
+            done
+          else
+            echo "no GPG key configured; checksum manifests published unsigned" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      # fail_on_unmatched_files must stay TRUE (a silently-dropped artifact is
+      # worse than a failed release), so the list has to be exactly the files
+      # that exist — the .asc manifests only exist when signing is on.
+      - name: Collect release assets
+        id: assets
+        run: |
+          {
+            echo "assets<<EOF"
+            for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.asc \
+                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.asc \
+                     macos/*.dmg macos/SHA256SUMS-dmg; do
+              [ -f "$f" ] && echo "$f"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing:"; sed -n '/^assets<</,/^EOF$/p' "$GITHUB_OUTPUT"
+      # Idempotency. `overwrite: true` replaces assets of the same name, but a
+      # re-run that fails halfway leaves the release holding a mix of old and
+      # new files. Delete every asset we are about to publish FIRST, so a
+      # failure mid-attach leaves a release that is visibly incomplete rather
+      # than quietly wrong.
+      - name: Remove superseded release assets
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            existing="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+            for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.asc \
+                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.asc \
+                     macos/*.dmg macos/SHA256SUMS-dmg; do
+              [ -f "$f" ] || continue
+              name="$(basename "$f")"
+              if grep -Fxq "$name" <<<"$existing"; then
+                echo "deleting existing asset $name"
+                gh release delete-asset "$GITHUB_REF_NAME" "$name" --yes
+              fi
+            done
+          else
+            echo "no existing release for $GITHUB_REF_NAME"
+          fi
       - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: "${{ github.ref_name }}"
           generate_release_notes: true
-          files: |
-            deb/*.deb
-            deb/SHA256SUMS-deb
-            apk/*.apk
-            apk/SHA256SUMS-apk
-            macos/*.dmg
-            macos/SHA256SUMS-dmg
+          fail_on_unmatched_files: true
           overwrite: true
+          files: ${{ steps.assets.outputs.assets }}

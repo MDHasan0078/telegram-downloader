@@ -2,6 +2,8 @@
 from types import SimpleNamespace
 
 from telegram_downloader.constants import MAX_TITLE_LEN
+import pytest
+
 from telegram_downloader.telegram_utils import (auto_title_from_message,
                                                 format_bytes, safe_filename,
                                                 split_urls)
@@ -83,3 +85,24 @@ def test_split_urls_rejects_lookalikes_and_http():
                 "ftp://t.me/a/1",
                 "file:///etc/passwd"):
         assert bad not in split_urls("t.me/a/1 " + bad), f"{bad} leaked in"
+
+
+def test_strips_bidi_and_zero_width_controls():
+    # U+202E is the extension-spoofing primitive: titles come from untrusted
+    # remote message text.
+    out = safe_filename("invoice\u202Etxt.exe")
+    assert "\u202e" not in out
+    assert "invoice" in out and "exe" in out
+    for c in ("\u200b", "\u2066", "\ufeff", "\u202a", "\u202d"):
+        assert c not in safe_filename(f"a{c}b.mp4")
+
+
+def test_windows_reserved_name_multi_dot():
+    # Windows applies the device check to the component before the FIRST dot.
+    for bad in ("aux.tar.gz", "CON.txt.mp4", "nul.zip.7z"):
+        out = safe_filename(bad)
+        assert not out.upper().split(".", 1)[0] in {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+        }, out

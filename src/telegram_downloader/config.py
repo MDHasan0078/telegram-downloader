@@ -28,7 +28,7 @@ APP_NAME = "telegram-downloader"
 OUTPUT_MODES = ("1", "2", "3")
 THEMES = ("system", "light", "dark")
 
-_UMASK_LOCK = threading.Lock()
+_UMASK_LOCK = threading.RLock()
 
 def _sanitize_display(s: str, limit: int = 500) -> str:
     """Strip control chars / ANSI escapes for safe terminal / UI display."""

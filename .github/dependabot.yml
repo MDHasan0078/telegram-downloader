@@ -1,0 +1,53 @@
+# The release pipeline pins every action to a full commit SHA. Dependabot is the
+# only thing that keeps those pins from rotting: it opens a PR carrying the new
+# SHA, so the pin is updated in the same reviewable diff as whatever the new
+# tag claims to change.
+#
+# `github-actions` covers .github/workflows/build.yml. A new version of
+# softprops/action-gh-release is the interesting one: it is the third-party
+# step that publishes the release, in the only job with contents: write.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # The three lockfiles are the supply chain for the .deb (requirements-runtime
+  # .lock is literally the end user's trust root) and for the Flet toolchain.
+  # Dependabot updates the pins and hashes together and still runs the full
+  # test job, so a bump cannot silently widen the closure.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - security
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      # Keep the runtime closure (what ships to end users) reviewable on its
+      # own: every change here changes what a user's first launch installs.
+      runtime:
+        patterns:
+          - "requirements-runtime.lock"
+    ignore:
+      # setuptools is the build backend; requirements-build.lock is the pin that
+      # actually governs it (see that file's header). Bumping it needs the
+      # pyproject `requires = ["setuptools>=68"]` lower bound moved too, which
+      # is a judgement call, not a bot update.
+      - dependency-name: setuptools

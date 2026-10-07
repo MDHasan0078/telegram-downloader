@@ -6,6 +6,9 @@ printing, and cancellation is cooperative via an asyncio.Event.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Union
 
@@ -19,6 +22,41 @@ MAX_TRANSFER_RETRIES = 8
 RETRY_BASE_SECONDS = 3
 MAX_FLOODWAIT_SECONDS = 300  # longer server rate-limits fail fast instead of hanging
 MIN_FREE_BYTES = 100 * 1024 ** 2  # headroom kept on disk beyond the file itself
+
+# Local write failures that retrying can never fix. These must NOT be treated
+# as network errors, or a full disk costs 8 retries, 8 client reconnects and
+# ~225s of backoff before finally blaming "the network".
+_FATAL_WRITE_ERRNOS = frozenset({
+    28,   # ENOSPC  - no space left on device
+    122,  # EDQUOT  - disk quota exceeded
+    5,    # EIO     - I/O error
+    27,   # EFBIG   - file too large
+    30,   # EROFS   - read-only filesystem
+})
+
+
+def _media_fingerprint(total: int, dc_id, location) -> str:
+    """Identity of the exact media this transfer is for.
+
+    A partial file is only resumable if it provably belongs to *this* media.
+    Keying on size alone let two different Telegram messages that share a
+    caption+extension splice into one byte-mixed "successful" file.
+
+    Must be STABLE across processes and across two structurally-equal objects.
+    `repr()` cannot be used for that: Telethon TL types define no __repr__, so
+    it yields `<... object at 0x7f...>` -- the heap address -- and every run
+    produced a different digest, so the sidecar never matched and every resume
+    silently restarted from zero. `to_dict()` is the serialisable, structural
+    form; sort_keys makes the encoding order-independent.
+    """
+    try:
+        payload = location.to_dict() if hasattr(location, "to_dict") else location
+        blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8", "replace")
+    except Exception:
+        # Last resort: still deterministic, just coarser (would let two
+        # same-size downloads to the same name share a resume decision).
+        blob = json.dumps([total, dc_id, str(type(location).__name__)]).encode()
+    return hashlib.sha256(f"{total}|{dc_id}|".encode() + blob).hexdigest()
 
 ProgressCb = Union[Callable[[int, int], None], Callable[[int, int], Awaitable[None]]]
 
@@ -132,42 +170,102 @@ async def download_resumable(client, message: Message, destination: Path,
             raise DownloadError("Cannot save here: the folder path is not safe.")
         elif not destination.is_file():
             raise DownloadError("Destination exists but is not a regular file.")
-    existing = destination.stat().st_size if destination.exists() else 0
-    # Resume-poison mitigation: never trust size match alone if file may be
-    # attacker-planted or truncated. If existing == total, verify file is
-    # non-empty and not a symlink target; otherwise re-download to .part file
-    # and only declare success after hash/size verification at end.
-    if existing > total:
-        # Don't blindly unlink user data that happens to share the name;
-        # keep the existing file and resume would corrupt. Instead, treat as
-        # poisoned and require explicit overwrite: remove only if it looks like
-        # a previous partial (not a generic existing file). Here we keep the
-        # file as .poisoned and start from 0 to avoid data loss.
+
+    # -- Stage into <name>.part with a sidecar proving ownership -------------
+    # Writing straight to the final name meant a crash left a truncated file
+    # that looked complete, and that resume trusted any bytes it found there.
+    # The transfer now only ever appends to a .part whose sidecar vouches for
+    # this exact media; the final name is produced by one atomic os.replace.
+    part = destination.with_name(destination.name + ".part")
+    sidecar = destination.with_name(destination.name + ".part.json")
+    fingerprint = _media_fingerprint(total, dc_id, location)
+
+    def _read_sidecar():
         try:
-            poisoned = destination.with_name(destination.name + ".poisoned")
-            destination.rename(poisoned)
-        except OSError:
+            with open(sidecar, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("fingerprint") != fingerprint or data.get("total") != total:
+            return None
+        return data
+
+    def _write_sidecar() -> None:
+        # Atomic + symlink-safe, and 0600: the sidecar lives beside the media.
+        from .config import _atomic_write
+        _atomic_write(sidecar, json.dumps(
+            {"fingerprint": fingerprint, "total": total,
+             "name": destination.name}).encode("utf-8"))
+
+    def _discard_partial(reason: str) -> None:
+        """Drop an untrustworthy partial, preserving any over-long bytes."""
+        if not part.exists():
+            return
+        if part.stat().st_size > total:
+            # Preserve rather than clobber: os.rename overwrites an existing
+            # target on POSIX, which destroyed the previously quarantined
+            # copy on the second occurrence. Use a unique name.
+            quarantined = destination.with_name(
+                f"{destination.name}.poisoned.{os.urandom(4).hex()}")
             try:
-                destination.unlink()
+                os.rename(part, quarantined)
+                return
             except OSError:
-                pass
-        existing = 0
-    if existing == total and existing > 0:
-        # Size match alone is not proof of integrity: a planted file with
-        # the exact size would otherwise skip the download. Drop it and
-        # re-download from 0; the end-of-transfer size check still applies.
-        # (Callers skip already-done queue items, so this path only runs
-        # on explicit retries.)
+                # Do NOT fall back to unlink(): that is silent data loss, the
+                # exact outcome the quarantine exists to prevent.
+                raise DownloadError(
+                    f"Refusing to overwrite an oversized partial at {part} "
+                    f"and cannot preserve it ({reason}). Move or delete it "
+                    f"manually, then retry.")
         try:
-            if destination.is_symlink() or destination.is_file():
-                destination.unlink()
+            part.unlink()
+        except OSError:
+            pass
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
+
+    if part.exists():
+        meta = _read_sidecar()
+        if meta is None:
+            # No sidecar, unparseable, or it names different media: we cannot
+            # prove those bytes are ours, so they are never appended to.
+            _discard_partial("sidecar missing or does not match this media")
+            existing = 0
+        else:
+            existing = part.stat().st_size
+    else:
+        # A sidecar without its partial is meaningless.
+        try:
+            sidecar.unlink()
         except OSError:
             pass
         existing = 0
-    elif existing == total:
-        # zero-byte file matches zero total should have been rejected earlier
-        destination.unlink(missing_ok=True)
+
+    if existing > total:
+        _discard_partial("partial longer than the declared total")
         existing = 0
+    if existing == total:
+        # Size match alone is not proof of integrity. The sidecar matched, so
+        # this really is our own complete transfer staged for publishing.
+        try:
+            if part.is_symlink() or part.is_file():
+                part.unlink()
+        except OSError:
+            pass
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
+        existing = 0
+
+    # Everything from here writes to the staged .part, never the final name.
+    final_path = destination
+    _stage = part
+    destination = part
 
     # Open ONCE for the whole transfer and verify via fstat on the held fd.
     # Path.open follows links, and the old per-chunk open with O_APPEND let a
@@ -176,13 +274,20 @@ async def download_resumable(client, message: Message, destination: Path,
     # write makes concurrent modification detectable; a path swap mid-transfer
     # just orphans writes to the old inode instead of ever writing through a
     # planted link (our writes never re-open, so ELOOP cannot bite later).
-    import os as _os
+    _os = os
     nofollow = getattr(_os, "O_NOFOLLOW", 0)
     current = existing
     await _emit(progress_cb, current, total)
     attempt = 0
     flood_waits = 0
+    # Separate budget. `attempt` is reset on every advancing chunk (so a long
+    # but flaky download is not killed by lifetime blips), which means it can
+    # never reach MAX_TRANSFER_RETRIES on a peer that keeps sending a little
+    # then hanging up -- that case ran forever. stream_ends counts only
+    # clean early hangups and is never reset.
+    stream_ends = 0
     MAX_FLOODWAITS = 3
+    fd = -1
 
     flags = _os.O_WRONLY | _os.O_CREAT | nofollow
     flags |= _os.O_APPEND if existing else _os.O_TRUNC
@@ -199,6 +304,20 @@ async def download_resumable(client, message: Message, destination: Path,
         if exc.errno == _errno.ELOOP:
             raise DownloadError(f"Cannot save here: the folder path is not safe at {destination}.") from exc
         raise DownloadError(f"Could not open {destination}: {exc}") from exc
+    # Claim the staged partial *before* any byte is written, so an interrupted
+    # run leaves a sidecar that proves the .part is resumable.
+    # Runs BEFORE the try/finally that owns `fd`, so a failure here must close
+    # it explicitly -- it used to leak one fd per failed sidecar write.
+    try:
+        _write_sidecar()
+    except (OSError, RuntimeError) as exc:
+        try:
+            _os.close(fd)
+        except OSError:
+            pass
+        fd = -1
+        raise DownloadError(
+            f"Could not write resume sidecar {sidecar}: {exc}") from exc
     try:
         try:
             actual = _os.fstat(fd).st_size
@@ -224,10 +343,14 @@ async def download_resumable(client, message: Message, destination: Path,
             # still passes the final size check.
             try:
                 if _os.fstat(fd).st_size != current:
-                    raise Cancelled(
+                    # An integrity failure, not a user cancellation: callers
+                    # bucket on the exception type, and reporting it as
+                    # Cancelled told users they pressed Stop.
+                    raise DownloadError(
                         f"Concurrent modification detected at {destination} "
-                        f"({_os.fstat(fd).st_size}/{current} bytes); aborting.")
-            except Cancelled:
+                        f"({_os.fstat(fd).st_size}/{current} bytes); aborting "
+                        f"to avoid writing a corrupt file.")
+            except (DownloadError, Cancelled):
                 raise
             except OSError:
                 pass
@@ -248,21 +371,47 @@ async def download_resumable(client, message: Message, destination: Path,
                     if current + len(chunk) > MAX_FILE_BYTES:
                         raise DownloadError(
                             f"Download would exceed the {MAX_FILE_BYTES} cap; aborted.")
-                    _written = _os.write(fd, chunk)
+                    # The write must not be able to fall through to the
+                    # network-retry handler below: a local ENOSPC/EROFS is not
+                    # a flaky connection and must fail immediately.
+                    try:
+                        _written = _os.write(fd, chunk)
+                    except OSError as exc:
+                        if getattr(exc, "errno", None) in _FATAL_WRITE_ERRNOS:
+                            raise DownloadError(
+                                f"Local write failed ({exc.strerror or exc}); "
+                                f"not retrying. Partial file kept at {destination}"
+                            ) from exc
+                        raise DownloadError(
+                            f"Could not write to {destination}: {exc}") from exc
                     if _written != len(chunk):
                         raise DownloadError(
                             f"Short write: {_written} of {len(chunk)} bytes — "
                             f"disk full? Partial file kept at {destination}")
-                    try:
-                        _os.fsync(fd)
-                    except OSError:
-                        pass
                     current += _written
-                    if current > MAX_FILE_BYTES:
-                        raise DownloadError(
-                            f"Download exceeded the {MAX_FILE_BYTES} cap; aborted.")
+                    # A chunk that actually advanced the file proves the
+                    # connection is healthy, so the consecutive-failure budget
+                    # resets here. Without this the 8-retry cap was spent over a
+                    # whole session and a long, merely flaky download died.
+                    attempt = 0
+                    flood_waits = 0
                     await _emit(progress_cb, current, total)
-                break
+                if current >= total:
+                    break
+                # Stream ended early without raising (server closed mid-file).
+                # The partial is on disk and the loop already supports
+                # offset=, so this is a recoverable interruption, not a
+                # terminal failure. Counted separately from `attempt`, which
+                # is reset by progress and would never trip here.
+                stream_ends += 1
+                if stream_ends > MAX_TRANSFER_RETRIES:
+                    raise DownloadError(
+                        f"Telegram ended the stream early {stream_ends} times "
+                        f"(last at {current}/{total} bytes). Partial kept at {destination}"
+                    )
+                await _retry_sleep(
+                    cancel, min(RETRY_BASE_SECONDS * (2 ** (stream_ends - 1)), 45),
+                    destination)
             except Cancelled:
                 raise
             except errors.FloodWaitError as exc:
@@ -341,9 +490,48 @@ async def download_resumable(client, message: Message, destination: Path,
             got = final_size if final_size >= 0 else 0
             raise DownloadError(
                 f"Incomplete file ({got}/{total} bytes). Partial kept at {destination}.")
-        return destination
-    finally:
+        # One flush for the whole transfer: fsync-per-chunk cost ~16k calls on
+        # an 8 GiB download, and the length check already covers a torn tail.
+        try:
+            _os.fsync(fd)
+        except OSError:
+            pass
         try:
             _os.close(fd)
         except OSError:
             pass
+        fd = -1
+        # Publish atomically onto the final name. Same directory, so this is a
+        # same-filesystem rename: a reader sees either the .part or the
+        # finished file, never a half-written "complete" download.
+        # os.replace() silently DESTROYS whatever already sits at the final
+        # name, so a pre-existing user file that happens to share the
+        # download's filename would be lost with no backup. Preserve it first,
+        # under a unique name so a second run cannot clobber the first.
+        if final_path.exists() and not final_path.is_symlink():
+            kept = final_path.with_name(
+                f"{final_path.name}.replaced.{os.urandom(4).hex()}")
+            try:
+                os.replace(final_path, kept)
+            except OSError as exc:
+                raise DownloadError(
+                    f"{final_path} already exists and could not be preserved "
+                    f"as {kept.name} ({exc}); refusing to overwrite it. "
+                    f"Move or delete it and retry.") from exc
+        try:
+            _os.replace(_stage, final_path)
+        except OSError as exc:
+            raise DownloadError(
+                f"Downloaded {total} bytes but could not publish to {final_path}: "
+                f"{exc}. Complete transfer kept at {_stage}") from exc
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
+        return final_path
+    finally:
+        if fd != -1:
+            try:
+                _os.close(fd)
+            except OSError:
+                pass

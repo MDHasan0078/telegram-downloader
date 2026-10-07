@@ -68,7 +68,13 @@ def ffmpeg_version() -> Optional[str]:
     if not exe:
         return None
     try:
-        r = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([exe, "-nostdin", "-version"],
+                           capture_output=True, text=True, timeout=10)
+        # A present-but-broken binary can still print a banner and exit
+        # non-zero; reporting that as a working ffmpeg pushed the failure
+        # downstream into the conversion.
+        if r.returncode != 0:
+            return None
         return (r.stdout.splitlines() or [""])[0].strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
@@ -139,13 +145,17 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
         raise RuntimeError(f"Cannot validate ffmpeg output path: {exc}") from exc
     video_codec, audio_codec = probe_codecs(input_path)
     can_remux = video_codec is not None and video_codec == "h264" and (audio_codec in {None, "aac"})
+    # -nostdin: ffmpeg's interactive key handler reads stdin even when it is
+    # not a tty. Inherited non-tty stdin (GUI launcher, `tg-dl ... < file`,
+    # systemd, a shell with buffered input) could hand it a single "q" and
+    # abort the conversion with exit 234 after a full download.
     if can_remux:
-        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y",
+        cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                "-i", str(input_path), "-map", "0:v:0?", "-map", "0:a:0?",
                "-c", "copy", "-movflags", "+faststart", "--", str(output_path)]
     else:
         preset = "veryfast" if mode == "2" else "medium"
-        cmd = [exe, "-hide_banner", "-loglevel", "error", "-y",
+        cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                "-i", str(input_path), "-map", "0:v:0?", "-map", "0:a:0?",
                "-c:v", "libx264", "-preset", preset, "-crf", "28",
                "-c:a", "aac", "-b:a", "128k",
@@ -188,12 +198,22 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
         except OSError:
             pass
         raise RuntimeError(f"FFmpeg processing failed; source kept at {input_path} ({exc})") from exc
+    # Verification gate. Three outcomes must stay distinct, because treating
+    # them alike deleted *valid* output:
+    #   * ffprobe not installed  -> cannot verify; trust ffmpeg's exit status
+    #   * output has no video    -> only an error if the INPUT had video
+    #                              (audio-only Telegram messages are valid)
+    #   * ffprobe ran and failed -> genuinely corrupt, unlink and raise
+    if not _bin("ffprobe"):
+        return
+    src_had_video = probe_codecs(input_path)[0] is not None
     if not ffprobe_has_video(output_path):
-        try:
-            output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"FFmpeg reported success but the MP4 could not be verified: {output_path}\n"
-            f"The source file was kept at: {input_path}"
-        )
+        if src_had_video:
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"FFmpeg reported success but the MP4 could not be verified: {output_path}\n"
+                f"The source file was kept at: {input_path}"
+            )

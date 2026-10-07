@@ -1,0 +1,90 @@
+# requirements-runtime.lock — HERMETIC runtime closure for the .deb.
+#
+# This file is the ONLY thing the end user's machine needs from the network:
+# nothing. scripts/build-deb.sh vendors every wheel listed here into
+# /opt/telegram-downloader/wheels/ and run.sh installs with
+#     pip install --no-index --find-links "$APP/wheels" --require-hashes \
+#                 --only-binary :all: --no-build-isolation \
+#                 -r requirements-runtime.lock <project wheel>
+# --no-index + --require-hashes + --only-binary together mean the install can
+# neither reach PyPI nor build C from an sdist as an unprivileged user.
+#
+# Every hash below is the sha256 published by PyPI for that exact artifact
+# (https://pypi.org/pypi/<name>/<version>/json), cross-checked against the
+# bytes actually vendored in wheels/ and recorded in wheels/SHA256SUMS.
+# The one exception is pyaes, which PyPI publishes as an sdist only: its hash
+# below is the hash of the repo-vendored wheel and matches the long-standing
+# wheels/SHA256SUMS entry for it.
+#
+# Closure: the `gui` extra only (flet) + the base dependency (telethon).
+# The `speed` extra (cryptg) is deliberately NOT here — see the note at the
+# bottom of this file.
+#
+# Regenerate (needs network; produces both this file and wheels/SHA256SUMS):
+#   rm -rf wheels/*.whl && mkdir -p wheels
+#   pip download --only-binary :all: --dest wheels \
+#       --find-links <a dir containing pyaes-1.6.1-py3-none-any.whl> \
+#       --python-version 3.12 --implementation cp --abi cp312 \
+#       --platform manylinux2014_x86_64 \
+#       'telethon>=1.36,<2' 'flet==0.86.5'
+#   for abi in cp310 cp311 cp313 cp314; do
+#     pip download --only-binary :all: --dest wheels --no-deps 'msgpack==1.2.3' \
+#       --python-version 3.${abi#cp3} --implementation cp --abi "$abi" \
+#       --platform manylinux2014_x86_64
+#   done
+#   ( cd wheels && sha256sum *.whl > SHA256SUMS )
+#
+# --- msgpack ships cp310..cp314 manylinux2014_x86_64 wheels on purpose -----
+# The .deb creates its venv from the SYSTEM python3, so the interpreter minor
+# version is the end user's choice, not ours. Vendoring one wheel per ABI of
+# the supported range (and Depends: python3 (>= 3.10), python3 (<< 3.15)) is
+# what lets --only-binary :all: succeed without compiling anything locally.
+#
+# --- why `speed`/cryptg is dropped ---------------------------------------
+# cryptg is an optional Telethon C acceleration module. Telethon works
+# correctly without it (it falls back to pure-python crypto). Worse, cryptg
+# is sdist-only for CPython, so `pip install "telegram-downloader[speed]"`
+# on Alpine/Termux/musl compiles C in the end user's unprivileged venv —
+# which needs a compiler the user may not have and, more importantly, means
+# running a build backend that pip fetched at that moment. Dropping it removes
+# an entire unpinned build-from-source path from the user's first launch.
+anyio==4.15.1 \
+    --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+flet==0.86.5 \
+    --hash=sha256:b0accfe78243611ab71c3a6adb0045a80f81a284d0cf037e38c7825c2fd45282
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+httpcore==1.0.9 \
+    --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+httpx==0.28.1 \
+    --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+idna==3.20 \
+    --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+msgpack==1.2.3 \
+    --hash=sha256:07c9733089d1b176c3dd2f7fa268452f9d5d784d076473499d754a58e8d1fbbb \
+    --hash=sha256:382b219de3d436de3baba0f4b0c6d4336e8f5858d0eb047918b13b69a71c6c55 \
+    --hash=sha256:5bf390259cb25a6a1cd197c65810999b811f64cd38683251538bcc5a1e41f7d3 \
+    --hash=sha256:d8ef3a66e4b52d2d7fdd90df2984670124b2ff7546d76bb25dcf68ef47f7df58 \
+    --hash=sha256:ede33b2892ceb976283e009ad12fa1834cfdf1f9c43ee9c97849fc588d00a618
+oauthlib==4.0.0 \
+    --hash=sha256:624c28c13a0a59cabf9747dfa52af63be3e512a7f2714df16e91b5b3a145e6cd
+pyaes==1.6.1 \
+    --hash=sha256:3c030326f7705165b00eb5b3b1a5cf23f4fa8888b5dbf437ce620c6d29dd94ec
+pyasn1==0.6.4 \
+    --hash=sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b
+repath==0.9.0 \
+    --hash=sha256:ee079d6c91faeb843274d22d8f786094ee01316ecfe293a1eb6546312bb6a318
+rsa==4.9.1 \
+    --hash=sha256:68635866661c6836b8d39430f97a996acbd61bfa49406748ea243539fe239762
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+telethon==1.45.0 \
+    --hash=sha256:339e24c83aedc9f12cbe389264627edc49779e4289c535aa90aafc4ce62f7972
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+
+# cryptg (the `speed` extra) is intentionally excluded from this closure; see
+# the header. Anyone who wants it can `pip install --user cryptg` themselves,
+# knowingly, outside the hermetic path.

@@ -59,3 +59,22 @@ def test_internal_id_strictly_numeric():
         parse_message_url("https://t.me/c/1e10/1")
     with pytest.raises(ValueError):
         parse_message_url("https://t.me/c/ab/1")
+
+
+def test_rejects_unicode_digits_in_ids():
+    # Python's \d matches any Unicode decimal digit and int() accepts them, so
+    # these visually distinct URLs resolved to real, different chats.
+    for bad in (
+        "https://t.me/c/\uff11\uff12\uff13/1",      # fullwidth
+        "https://t.me/c/\u0661\u0662\u0663/1",      # arabic-indic
+        "https://t.me/chan/\uff10",                 # fullwidth message id
+    ):
+        with pytest.raises(ValueError):
+            parse_message_url(bad)
+
+
+def test_rejects_zero_message_id():
+    # Telegram ids are 1-based; /0 must not resolve.
+    for bad in ("https://t.me/c/123/0", "https://t.me/chan/0"):
+        with pytest.raises(ValueError):
+            parse_message_url(bad)

@@ -40,9 +40,14 @@ def _sanitize_str(v: Any) -> str:
 def _sanitize_num(v: Any, is_float: bool = False) -> Any:
     try:
         n = float(v or 0) if is_float else int(v or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError matters: int(float("inf")) raises it, and it is an
+        # ArithmeticError -- NOT a ValueError -- so it used to escape and
+        # crash startup from a crafted queue.json.
         return 0.0 if is_float else 0
     if is_float:
+        if not math.isfinite(n):
+            return 0.0
         return max(0.0, min(100.0, n))
     return max(0, min(MAX_NUM_FIELD, n))
 
@@ -155,17 +160,24 @@ class QueueStore:
                     # TOCTOU where a 1-byte file is swapped for a 500MB one
                     # between the size check and the read.
                     if os.fstat(fd).st_size > MAX_QUEUE_BYTES:
+                        # Close first: raising here jumped to the outer
+                        # handler, which never closed fd -> one leaked fd
+                        # per oversized load.
+                        os.close(fd)
+                        fd = -1
                         raise ValueError("queue file too large")
                 except OSError:
                     pass
                 try:
                     with os.fdopen(fd, "r", encoding="utf-8") as fh:
                         fd = -1
-                        raw = json.load(
-                            fh,
-                            parse_constant=lambda x: (_ for _ in ()).throw(
-                                ValueError("non-finite number in queue")),
-                        )
+                        # Non-finite literals are coerced, NOT rejected: a
+                        # single poisoned field used to trip this ValueError
+                        # and wipe *every* item in the queue. parse_constant
+                        # only fires for the bare tokens NaN/Infinity/
+                        # -Infinity, which are numbers, so 0.0 is a safe
+                        # stand-in -- _sanitize_num clamps it anyway.
+                        raw = json.load(fh, parse_constant=lambda _c: 0.0)
                 finally:
                     if fd != -1:
                         try:
@@ -209,23 +221,49 @@ class QueueStore:
             self.items = []
 
     def save(self) -> None:
+        # Build the payload on a local list. A *save* must not half-mutate
+        # live state: the old code evicted from self.items in place and then
+        # bailed out with "save skipped", leaving 999 of 1000 items destroyed
+        # in memory while the file on disk kept the original contents.
+        items = self.items
+        if len(items) > MAX_QUEUE_ITEMS:
+            print(f"Warning: queue overflow, dropped {len(items) - MAX_QUEUE_ITEMS} oldest item(s)", file=sys.stderr)
+            items = items[-MAX_QUEUE_ITEMS:]
+
+        def _dump(seq):
+            # allow_nan=False: writing NaN/Infinity produced a file the
+            # loader was contractually forbidden to read.
+            return json.dumps([i.to_dict() for i in seq], indent=2,
+                              allow_nan=False).encode("utf-8")
+
         try:
-            if len(self.items) > MAX_QUEUE_ITEMS:
-                print(f"Warning: queue overflow, dropped {len(self.items) - MAX_QUEUE_ITEMS} oldest item(s)", file=sys.stderr)
-                self.items = self.items[-MAX_QUEUE_ITEMS:]
-            data = json.dumps([i.to_dict() for i in self.items], indent=2).encode("utf-8")
-            # Never silently drop the whole save when oversized: evict
-            # oldest items until it fits (active downloads are newest-first
-            # in practice since extend appends).
-            while len(data) > MAX_QUEUE_BYTES and len(self.items) > 1:
-                self.items = self.items[1:]
-                data = json.dumps([i.to_dict() for i in self.items], indent=2).encode("utf-8")
+            data = _dump(items)
+        except ValueError as exc:
+            print(f"Warning: queue not saved, non-finite value: {exc}", file=sys.stderr)
+            return
+        try:
+            # Evict oldest-first until it fits. items[0] is the oldest, since
+            # extend() appends.
+            dropped = 0
+            while len(data) > MAX_QUEUE_BYTES and len(items) > 1:
+                items = items[1:]
+                dropped += 1
+                data = _dump(items)
             if len(data) > MAX_QUEUE_BYTES:
+                # A single item alone is too big. Leave memory untouched and
+                # skip the save rather than corrupting the live queue.
                 print("Warning: queue data exceeds size limit, save skipped", file=sys.stderr)
                 return
+            if dropped:
+                print(f"Warning: dropped {dropped} oldest item(s) to fit size limit", file=sys.stderr)
+            # Only now, with a payload that actually fits, commit both the
+            # file and the in-memory view so they cannot disagree.
             _atomic_write(self.path, data)
-        except OSError:
-            pass
+            self.items = items
+        except OSError as exc:
+            # Was silently swallowed: ENOSPC/EROFS meant the queue was never
+            # persisted with no diagnostic at all.
+            print(f"Warning: could not persist queue to {self.path}: {exc}", file=sys.stderr)
 
     # -- mutation --------------------------------------------------------
     def on_change(self, fn: Callable[[], None]) -> None:
@@ -288,12 +326,12 @@ class QueueStore:
             if k == "progress":
                 try:
                     v = _sanitize_num(v, is_float=True)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
             if k in ("size", "current_bytes", "total_bytes"):
                 try:
                     v = _sanitize_num(v)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
             if isinstance(v, bool):
                 continue

@@ -19,10 +19,14 @@ def parse_message_url(url: str) -> Tuple[ChatRef, int, Optional[int]]:
         raise ValueError("Telegram URL too long.")
     patterns = [
         # t.me/c/<internal id>/<msg> or /<thread>/<msg>  (id capped at 15
-        # digits so -100 prefix stays well inside signed 64-bit range)
-        (r"^https://(?:t\.me|telegram\.me)/c/(\d{1,15})/(\d{1,10})(?:/(\d{1,10}))?(?:\?.*)?/?$", True),
+        # digits so -100 prefix stays well inside signed 64-bit range).
+        # [0-9] not \d: Python's \d matches ANY Unicode decimal digit and
+        # int() accepts them, so a visually distinct URL such as
+        # t.me/c/１２３/１ resolved to a real, different chat. Leading [1-9]
+        # because Telegram message/thread ids are 1-based.
+        (r"^https://(?:t\.me|telegram\.me)/c/([1-9][0-9]{0,14})/([1-9][0-9]{0,9})(?:/([1-9][0-9]{0,9}))?(?:\?.*)?/?$", True),
         # t.me/<username>/<msg> or /<thread>/<msg>
-        (r"^https://(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,32})/(\d{1,10})(?:/(\d{1,10}))?(?:\?.*)?/?$", False),
+        (r"^https://(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,32})/([1-9][0-9]{0,9})(?:/([1-9][0-9]{0,9}))?(?:\?.*)?/?$", False),
     ]
     for pattern, is_internal in patterns:
         m = re.match(pattern, url)
@@ -57,6 +61,12 @@ def safe_filename(name: str) -> str:
     # Replace null bytes and control chars first — they can truncate strings
     # in C-based tools (ffmpeg, ffprobe, shell) and confuse argument parsing.
     name = re.sub(r"[\x00-\x1f\x7f]", "_", name)
+    # Then strip Unicode format controls entirely rather than replacing them:
+    # they are invisible, so substituting "_" would leave a visible scar, and
+    # U+202E (RLO) is the classic extension-spoofing primitive that makes
+    # "invoice.txt.exe" display as "invoice.exe.txt". Titles come from
+    # untrusted remote message text.
+    name = re.sub("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]", "", name)
     # `$` and backticks are shell-special: a crafted title must not be able
     # to smuggle command substitution into a later shell invocation.
     name = re.sub(r"[\\/:*?\"<>|$`]", "_", name)
@@ -69,9 +79,9 @@ def safe_filename(name: str) -> str:
     if name.startswith("-"):
         name = "_" + name
     # Windows reserved device names (case-insensitive, with or without ext).
-    base = name
-    if "." in name:
-        base = name.rsplit(".", 1)[0]
+    # The check applies to the component before the FIRST dot: Windows treats
+    # "aux.tar.gz" as a device, but rsplit(".", 1) only looked at the last.
+    base = name.split(".", 1)[0].strip().rstrip(" ")
     upper = base.upper()
     reserved = {"CON", "PRN", "AUX", "NUL"} | {
         f"COM{i}" for i in range(1, 10)
@@ -85,7 +95,9 @@ def format_bytes(value: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
     try:
         n = max(0.0, float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # float(10**400) raises OverflowError, an ArithmeticError -- not a
+        # ValueError -- so it escaped and crashed the caller.
         n = 0.0
     for unit in units:
         if n < 1024 or unit == units[-1]:

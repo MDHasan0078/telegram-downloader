@@ -3,8 +3,16 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+# build/ is BOTH setuptools' staging directory and (by flet's default) the apk/
+# dmg output directory. It must stay untracked — it is how a stale snapshot
+# survives a checkout — but it is also why every build script starts with
+# `rm -rf build dist *.egg-info`, and why scripts/verify_wheel_matches_src.py
+# diffs the built wheel against src/ before anything ships. Do not add an
+# exception for it.
 build/
 dist/
+# flet's own caches
+.flet/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
@@ -32,5 +40,14 @@ keys/
 *.deb
 *.apk
 *.aab
+# Detached signatures emitted next to release artifacts in CI. Never commit a
+# private key; keys live in repository secrets only.
+*.asc
 CODESPACES_GIT.md
 conversation.txt
+
+# NOTE: requirements-*.lock and wheels/*.whl are DELIBERATELY tracked. The .deb
+# installs its whole runtime closure from wheels/ with --no-index
+# --require-hashes, so those files are the end user's entire trust root. If
+# either ever stops being committed, the .deb build must fail loudly (see the
+# completeness checks in scripts/build-deb.sh) rather than fall back to PyPI.
