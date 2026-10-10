@@ -22,11 +22,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["flet==0.86.5"]
+gui = ["flet==1.0.3"]
 speed = ["cryptg>=0.4.0,<2"]
 # NB: no 'rich'/'tqdm' extras — nothing imports them (verified). Keeping the
 # extra would only attract misreported missing-dependency bugs.
-all = ["flet==0.86.5", "cryptg>=0.4.0,<2"]
+all = ["flet==1.0.3", "cryptg>=0.4.0,<2"]
 test = ["pytest>=7", "pytest-asyncio>=0.23"]
 
 [project.scripts]
