@@ -248,19 +248,17 @@ async def download_resumable(client, message: Message, destination: Path,
     if existing > total:
         _discard_partial("partial longer than the declared total")
         existing = 0
-    if existing == total:
-        # Size match alone is not proof of integrity. The sidecar matched, so
-        # this really is our own complete transfer staged for publishing.
-        try:
-            if part.is_symlink() or part.is_file():
-                part.unlink()
-        except OSError:
-            pass
-        try:
-            sidecar.unlink()
-        except OSError:
-            pass
-        existing = 0
+    # A complete staged transfer: the sidecar matched, so this really is our
+    # own finished download waiting to be published. Deleting it here (as this
+    # once did) forced a re-fetch from offset 0 -- so a publish that kept
+    # failing (read-only dir, ENOSPC on the directory entry, immutable target)
+    # re-pulled the whole file on every retry and made no progress at all,
+    # contradicting the "complete transfer kept at ..." promise made by the
+    # publish error below. Leave `existing == total` alone and let the publish
+    # path run: the fstat integrity gate and the symlink refusal further down
+    # still apply, so nothing is skipped except the redundant transfer.
+    #
+    # `total` is still needed further down, so nothing is reassigned here.
 
     # Everything from here writes to the staged .part, never the final name.
     final_path = destination

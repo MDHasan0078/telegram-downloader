@@ -18,7 +18,9 @@ import json
 import os
 import re
 import secrets
+import stat as _stat_mod
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -29,6 +31,12 @@ OUTPUT_MODES = ("1", "2", "3")
 THEMES = ("system", "light", "dark")
 
 _UMASK_LOCK = threading.RLock()
+
+# How many `.corrupt-*.bak` copies of an unparseable config.json to keep
+# before pruning the oldest. Same bound (and same reasoning) as
+# QueueStore.load(): a corrupt file must not be able to fill the disk by
+# itself.
+MAX_CORRUPT_BACKUPS = 5
 
 def _sanitize_display(s: str, limit: int = 500) -> str:
     """Strip control chars / ANSI escapes for safe terminal / UI display."""

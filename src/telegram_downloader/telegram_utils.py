@@ -5,9 +5,38 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from .constants import MAX_TITLE_LEN, MAX_URL_LEN, MAX_URL_LIST_BYTES, MAX_URLS
+from .constants import (MAX_TITLE_BYTES, MAX_TITLE_LEN, MAX_URL_LEN,
+                        MAX_URL_LIST_BYTES, MAX_URLS)
 
 ChatRef = Union[str, int]
+
+
+def _truncate_title(name: str) -> str:
+    """Cap a title on BOTH axes: MAX_TITLE_LEN characters and
+    MAX_TITLE_BYTES UTF-8 bytes.
+
+    The character cap alone was a real, remotely-triggerable denial of
+    service: `len()` counts code points, but filesystems cap a path component
+    at 255 *bytes*. 140 emoji is 140 characters (under the cap, so never
+    truncated) but 560 bytes, which no filesystem accepts -- os.open() raises
+    ENAMETOOLONG and the download fails identically on every retry because the
+    title is re-derived from the same remote caption each time.
+
+    Both caps are applied because they mean different things: MAX_TITLE_LEN is
+    a readability budget, MAX_TITLE_BYTES is what the filesystem will accept
+    once the extension and the staging suffix are appended.
+
+    The byte cut is taken on an ENCODED string and decoded with errors=
+    "ignore" so the boundary can never split a multi-byte character -- slicing
+    the str by index is safe (code points are atomic) but slicing the bytes
+    and decoding strictly would raise or leave a U+FFFD scar mid-title.
+    """
+    if len(name) > MAX_TITLE_LEN:
+        name = name[:MAX_TITLE_LEN].rstrip()
+    encoded = name.encode("utf-8", "replace")
+    if len(encoded) > MAX_TITLE_BYTES:
+        name = encoded[:MAX_TITLE_BYTES].decode("utf-8", "ignore").rstrip()
+    return name
 
 
 def parse_message_url(url: str) -> Tuple[ChatRef, int, Optional[int]]:
@@ -73,8 +102,7 @@ def safe_filename(name: str) -> str:
     name = name.strip().strip(".")
     # Collapse whitespace, cap length for filesystems.
     name = re.sub(r"\s+", " ", name).strip()
-    if len(name) > MAX_TITLE_LEN:
-        name = name[:MAX_TITLE_LEN].rstrip()
+    name = _truncate_title(name)
     # Leading dash would make ffmpeg treat the filename as an option.
     if name.startswith("-"):
         name = "_" + name

@@ -7,7 +7,7 @@ on:
       sign:
         description: >-
           Sign artifacts with the release keys, but only for the platforms whose
-          secrets are configured (GPG for the .deb checksums, Developer ID for
+          secrets are configured (Ed25519 for the checksum manifests, Developer ID for
           the .dmg, upload keystore for the .apk). Skipped silently when the
           secret is absent so forks build unsigned.
         type: boolean
@@ -362,9 +362,7 @@ jobs:
       - name: Compute and sign checksum manifests
         env:
           SIGN: ${{ inputs.sign }}
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           ( cd deb   && sha256sum *.deb > SHA256SUMS-deb )
@@ -374,22 +372,44 @@ jobs:
             echo "--- $f"; cat "$f"
             ( cd "$(dirname "$f")" && sha256sum -c "$(basename "$f")" )
           done
-          if [ "$SIGN" != "false" ] && [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+          if [ "$SIGN" != "false" ] && [ -n "${RELEASE_SIGNING_KEY:-}" ]; then
             echo "HAS_SIGNING_KEY=true" >> "$GITHUB_ENV"
+            # The private key exists only in $RUNNER_TEMP for the length of
+            # this step, under umask 077, and is removed by the EXIT trap even
+            # if signing fails partway. It is never written to the workspace,
+            # never echoed, and never committed.
             umask 077
-            LOCAL_ARGS=(--batch --yes --pinentry-mode loopback --passphrase-fd 3 --armor)
-            if [ -n "${GPG_KEY_ID:-}" ]; then
-              LOCAL_ARGS+=(--local-user "$GPG_KEY_ID")
-            fi
-            gpgconf --kill all || true
-            gpg --batch --quiet --import <<<"$GPG_PRIVATE_KEY"
+            KEY="$RUNNER_TEMP/release-signing.pem"
+            cleanup_key() { rm -f "$KEY"; }
+            trap cleanup_key EXIT
+            printf '%s' "$RELEASE_SIGNING_KEY" | base64 -d > "$KEY"
+            chmod 600 "$KEY"
+            # An SPKI DER blob for Ed25519 is exactly 44 bytes: a 12-byte
+            # header followed by the 32 raw public key bytes. The key id MUST
+            # be derived exactly as _release_verify.key_id_for does, because
+            # that is the value the app checks the envelope against:
+            #   sha256(b"tgdl-release-key:" + raw32).hexdigest()[:8]
+            KEYID="$(openssl pkey -in "$KEY" -pubout -outform DER | tail -c 32 \
+              | python3 -c 'import hashlib,sys; print(hashlib.sha256(b"tgdl-release-key:"+sys.stdin.buffer.read()).hexdigest()[:8])')"
+            echo "release signing key id: $KEYID"
             for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
-              gpg "${LOCAL_ARGS[@]}" --detach-sign --output "$f.asc" "$f" \
-                3<<<"${GPG_PASSPHRASE:-}"
-              gpg --batch --verify "$f.asc" "$f"
+              dir="$(dirname "$f")"
+              base="$(basename "$f")"
+              # -rawin = Ed25519 over the message itself (PureEdDSA), which is
+              # what the app's pure-Python RFC 8032 verifier implements.
+              openssl pkeyutl -sign -inkey "$KEY" -rawin \
+                -in "$f" -out "$dir/$base.sig.raw"
+              printf 'tgdl-ed25519-v1 %s %s\n' "$KEYID" \
+                "$(base64 -w0 < "$dir/$base.sig.raw")" > "$dir/$base.sig"
+              rm -f "$dir/$base.sig.raw"
             done
+            # Fail the release loudly rather than shipping manifests the app
+            # will refuse: a signed release that is missing a signature is
+            # indistinguishable from an attack at install time.
+            ls -l deb/SHA256SUMS-deb.sig apk/SHA256SUMS-apk.sig macos/SHA256SUMS-dmg.sig
           else
-            echo "no GPG key configured; checksum manifests published unsigned" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::No RELEASE_SIGNING_KEY secret configured; checksum manifests published UNSIGNED. The in-app updater will refuse to install these (that is intentional, not a bug)."
+            echo "no Ed25519 signing key configured; checksum manifests published unsigned" >> "$GITHUB_STEP_SUMMARY"
           fi
       # fail_on_unmatched_files must stay TRUE (a silently-dropped artifact is
       # worse than a failed release), so the list has to be exactly the files
@@ -399,9 +419,9 @@ jobs:
         run: |
           {
             echo "assets<<EOF"
-            for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.asc \
-                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.asc \
-                     macos/*.dmg macos/SHA256SUMS-dmg; do
+            for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.sig \
+                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.sig \
+                     macos/*.dmg macos/SHA256SUMS-dmg macos/SHA256SUMS-dmg.sig; do
               [ -f "$f" ] && echo "$f"
             done
             echo "EOF"
@@ -419,9 +439,9 @@ jobs:
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             existing="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
-            for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.asc \
-                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.asc \
-                     macos/*.dmg macos/SHA256SUMS-dmg; do
+            for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.sig \
+                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.sig \
+                     macos/*.dmg macos/SHA256SUMS-dmg macos/SHA256SUMS-dmg.sig; do
               [ -f "$f" ] || continue
               name="$(basename "$f")"
               if grep -Fxq "$name" <<<"$existing"; then
