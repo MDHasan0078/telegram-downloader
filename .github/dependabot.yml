@@ -46,6 +46,14 @@ updates:
         patterns:
           - "requirements-runtime.lock"
     ignore:
+      # flet 1.x removed `ft.app()`, which gui.py still calls. It is not a
+      # routine bump: migrating means porting the entry point to the new API,
+      # regenerating requirements-flet.lock with hashes, and re-vendoring the
+      # whole flet wheel closure that the .deb installs with --require-hashes.
+      # Verified against the published flet-1.0.3 wheel (no `app` in __all__).
+      # Do not let a bot propose this again until that migration is done.
+      - dependency-name: flet
+        versions: [">=1.0.0"]
       # setuptools is the build backend; requirements-build.lock is the pin that
       # actually governs it (see that file's header). Bumping it needs the
       # pyproject `requires = ["setuptools>=68"]` lower bound moved too, which
