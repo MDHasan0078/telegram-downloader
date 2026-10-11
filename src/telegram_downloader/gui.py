@@ -155,15 +155,23 @@ def run_gui(port=None):
                     state["client"] = None
                     state.pop("client_fp", None)
                     clear_session()
-                    try:
-                        st0 = load_settings()
-                        st0.user_id = None
-                        save_settings(st0)
-                    except Exception:
-                        pass
+                    # The pin is DELIBERATELY NOT cleared here. Clearing it
+                    # made this guard one-shot: the first mismatch was
+                    # refused, the user re-logged in, and the SECOND attempt
+                    # re-pinned whatever session was present as trusted --
+                    # so a planted session was adopted on the second try.
+                    # That is exactly the attack this pin exists to stop, and
+                    # it made the GUI strictly weaker than the CLI, which
+                    # clears the session but keeps the pin. The way out is
+                    # the explicit "this really is a different account"
+                    # action in the login view (see _reset_identity_pin),
+                    # never an automatic side effect of refusing.
                     raise RuntimeError(
-                        "You seem to have switched Telegram accounts. "
-                        "For safety, you've been signed out. Please log in again.")
+                        "A different Telegram account is signed in than the one "
+                        "this install is pinned to. For safety you have been "
+                        "signed out. If that is expected, use 'Use a different "
+                        "account' on the sign-in screen; otherwise this "
+                        "session file was replaced by someone else.")
                 if me_id:
                     state["me_id"] = me_id
             except RuntimeError:
@@ -545,6 +553,32 @@ def run_gui(port=None):
                     if not ok:
                         status_txt.value = "Login cancelled."
                         return
+            except RuntimeError as exc:
+                # An identity-pin mismatch surfaces as a RuntimeError from
+                # get_client(). Offer the explicit reset here rather than
+                # leaving the user with a dead end: without this the pin is
+                # never clearable from the GUI at all.
+                msg = _sanitize_display(str(exc))
+                if "pinned" in msg or "different Telegram account" in msg:
+                    c = state.get("client")
+                    if c is None:
+                        from . import tg_client as _tc
+                        try:
+                            st0 = load_settings()
+                            c = _tc.build_client(st0.api_id_int(), str(st0.api_hash))
+                        except Exception:
+                            c = None
+                    if c is not None and await _reset_identity_pin(page, c):
+                        status_txt.value = "Account pin cleared — sign in again."
+                        snack(page, "Account pin cleared. Sign in with the "
+                                    "account you want to use.")
+                        page.update()
+                        return
+                    status_txt.value = msg
+                    snack(page, msg, error=True)
+                    page.update()
+                    return
+                raise
                 state["previews"] = []
                 for u in urls:
                     status_txt.value = f"Fetching: {_sanitize_display(u)}"
@@ -2238,6 +2272,51 @@ def run_gui(port=None):
                 del phone
             except NameError:
                 pass
+
+    async def _reset_identity_pin(page, client) -> bool:
+        """Deliberate, confirmed escape from an identity-pin mismatch.
+
+        Because get_client() no longer clears the pin when it refuses, a user
+        who genuinely switched accounts would otherwise be stuck: every
+        attempt re-triggers the same refusal with no way forward. This is the
+        ONLY thing that clears the pin, and it is intentionally awkward --
+        an explicit dialog naming the risk, so it cannot be triggered by a
+        planted session, a stray click, or a retry.
+
+        Returns True if the pin was cleared (caller should retry sign-in).
+        """
+        ok = await confirm_dialog(
+            page,
+            "Use a different Telegram account?",
+            "This install is pinned to a different Telegram account, so the "
+            "saved session was refused.\n\n"
+            "Only continue if YOU changed accounts. If you did not, someone "
+            "else may have replaced the session file on this computer — "
+            "cancelling leaves the pin in place and keeps refusing it.\n\n"
+            "Clearing the pin lets the next sign-in be trusted.",
+            action="Clear pin and sign in",
+            icon=ft.Icons.WARNING_AMBER)
+        if not ok:
+            return False
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+        try:
+            clear_session()
+        except Exception:
+            pass
+        try:
+            st0 = load_settings()
+            st0.user_id = None
+            save_settings(st0)
+        except Exception as exc:
+            snack(page, f"Could not clear the account pin: {exc}", error=True)
+            return False
+        state["client"] = None
+        state.pop("client_fp", None)
+        state.pop("me_id", None)
+        return True
 
     async def confirm_dialog(page, title: str, body: str,
                              action: str = "Download",
