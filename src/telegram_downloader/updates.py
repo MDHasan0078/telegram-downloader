@@ -21,6 +21,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -1047,3 +1048,72 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
             # good installer left by an earlier successful download.
             if renamed:
                 _unlink_quietly(dest)
+
+
+# --------------------------------------------------------------------------
+# Local install
+# --------------------------------------------------------------------------
+# SECURITY NOTE, stated plainly rather than buried: this installs a file that
+# was fetched over the network, as root, via pkexec. The caller is expected
+# to have ALREADY verified the download (download_asset checks the digest
+# against the release manifest); what this function adds is no verification
+# of its own. pkexec shows the user's own password prompt, so the human — not
+# this code — is the consent boundary. It is deliberately a separate function
+# from download_asset so that "download" and "run as root" stay two visible,
+# separately-callable steps rather than one fused operation.
+INSTALL_TIMEOUT_SECONDS = 300
+
+
+def install_deb(path) -> tuple[bool, str]:
+    """Install a downloaded .deb with apt-get under pkexec.
+
+    Returns (ok, message). Runs synchronously — call it via
+    asyncio.to_thread so the UI thread is not blocked while the user types
+    their password.
+
+    `pkexec` is used rather than sudo because it goes through polkit, which
+    shows the distribution's own authentication dialog. That prompt is the
+    security boundary here: nothing is installed without an explicit human
+    action, and the password never passes through this process.
+
+    argv is a list, never a shell string, so a filename can never be
+    interpreted as shell syntax.
+    """
+    path = os.fspath(path)
+    if not os.path.isfile(path):
+        return False, f"Installer not found: {path}"
+    if shutil.which("pkexec") is None:
+        return False, ("pkexec is not available on this system, so the "
+                       "installer cannot be run with your password. Install it "
+                       "manually.")
+    try:
+        result = subprocess.run(
+            ["pkexec", "apt-get", "install", "-y", os.path.abspath(path)],
+            capture_output=True, text=True, timeout=INSTALL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Installation timed out."
+    except FileNotFoundError:
+        return False, "pkexec is not available on this system."
+    except OSError as exc:
+        return False, str(exc)
+    if result.returncode == 0:
+        return True, "Update installed successfully."
+    err = (result.stderr or result.stdout or "Unknown error").strip()
+    return False, err[-500:] or f"apt-get exited {result.returncode}"
+
+
+def installable_asset(info):
+    """The asset we can actually install in place, or None.
+
+    Only .deb can be installed unattended on a desktop. A .dmg needs a
+    mounted disk image and a drag-to-Applications step; an .apk is an Android
+    package that a desktop Linux machine cannot install at all. Rather than
+    pretend, those fall back to opening the release page.
+    """
+    asset = info.asset_for_platform() if info is not None else None
+    if asset is None:
+        return None
+    if getattr(asset, "name", "").endswith(".deb"):
+        return asset
+    return None

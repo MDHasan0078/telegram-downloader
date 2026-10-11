@@ -13,6 +13,7 @@ Run:  tg-dl gui   (needs `pip install -e '.[gui]'`)
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 import subprocess
 import sys
@@ -1678,25 +1679,59 @@ def run_gui(port=None):
         check_updates_btn.on_click = on_check_updates
 
         async def download_installer(page, info):
-            asset = info.asset_for_platform()
+            asset = updates.installable_asset(info)
             if asset is None:
+                # .dmg needs a mounted image and a drag-to-Applications step;
+                # .apk is an Android package a desktop cannot install. Send
+                # the user to the release page instead of pretending.
                 snack(page, "No installer for your OS — opening release page instead.", error=True)
                 try:
                     updates.open_release_page(info.release_url)
                 except Exception:
                     pass
                 return
+            # The check-for-updates button is the only control this flow can
+            # be re-entered from; disable it so a second click cannot start a
+            # second download/install while one is already in flight.
+            check_updates_btn.disabled = True
             snack(page, f"Downloading {asset.name}...")
             try:
-                import os as _os
-                token = _os.environ.get("GITHUB_TOKEN") or ""
+                token = os.environ.get("GITHUB_TOKEN") or ""
                 dest = await asyncio.to_thread(
                     updates.download_asset, asset,
                     ensure_download_dir(load_settings()), info.latest_version,
                     token or None)
-                snack(page, f"Saved installer to {dest}. Install it manually to upgrade.")
             except Exception as exc:
                 snack(page, f"Download failed: {exc}", error=True)
+                return
+            finally:
+                check_updates_btn.disabled = False
+
+            # From here the file is verified and on disk. Installing runs it
+            # as root through pkexec, so it is a separate, explicit step with
+            # its own confirmation — never fused silently into the download.
+            go = await confirm_dialog(
+                page,
+                "Install this update?",
+                f"Downloaded and verified:\n{_sanitize_display(os.path.basename(str(dest)))}\n\n"
+                "Installing runs apt-get with administrator rights. Your "
+                "normal password prompt will appear. The app should be closed "
+                "while it updates.",
+                action="Install and restart", icon=ft.Icons.INSTALL_MOBILE)
+            if not go:
+                snack(page, f"Installer saved to {dest}.")
+                return
+            snack(page, "Installing… approve the password prompt to continue.")
+            ok, msg = await asyncio.to_thread(updates.install_deb, dest)
+            if ok:
+                snack(page, msg)
+                try:
+                    page.window_close()
+                except Exception:
+                    pass
+            else:
+                snack(page, f"Install failed: {msg}", error=True)
+                snack(page, f"The installer is still at {dest}.")
 
         def _about_rows():
             try:
