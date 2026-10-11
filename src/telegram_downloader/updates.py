@@ -171,13 +171,19 @@ def _urlopen_no_redirect(req: urllib.request.Request, timeout: int,
     and only when GitHub answers a status a token can actually help with.
     The token is never logged and never appears in an error message.
 
-    404 belongs in that retry set. This repository is PRIVATE, and GitHub
-    deliberately answers 404 -- not 403 -- for an unauthenticated request to
-    a private repo, so that its existence is not disclosed. Retrying only on
-    403/429 therefore meant the updater could NEVER read its own releases:
+    404 belongs in that retry set. While this repository was PRIVATE, GitHub
+    answered 404 -- not 403 -- to an unauthenticated request for it,
+    deliberately, so that its existence would not be disclosed. Retrying only
+    on 403/429 therefore meant the updater could NEVER read its own releases:
     verified with a valid token, the same request succeeded via curl and gh
-    while check_for_update() returned None. The retry still sends the token
-    only to an allowlisted host, so this widens *when* a token is used, not
+    while check_for_update() returned None.
+
+    Keeping 404 in the set is correct now that the repo is PUBLIC too: the
+    unauthenticated first request then simply succeeds and the retry never
+    fires, so the behaviour is unchanged -- but a user who has since made the
+    repo private again, or who runs a fork, is still covered. The retry still
+    sends the token only to an allowlisted host, so this widens *when* a
+    token is used, not
     *where* it can go.
     """
     allowed = ASSET_HOSTS if allowed_hosts is None else allowed_hosts
