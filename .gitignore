@@ -46,6 +46,13 @@ keys/
 CODESPACES_GIT.md
 conversation.txt
 
+# Default output directory of scripts/release-keygen.sh. That script writes a
+# RELEASE SIGNING PRIVATE KEY to disk; it must never be committable, not even
+# by accident, not even in a "temporary" commit.
+release-keys/
+release-signing.key
+release-signing.key.pem
+
 # NOTE: requirements-*.lock and wheels/*.whl are DELIBERATELY tracked. The .deb
 # installs its whole runtime closure from wheels/ with --no-index
 # --require-hashes, so those files are the end user's entire trust root. If

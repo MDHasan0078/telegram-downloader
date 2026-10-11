@@ -359,6 +359,54 @@ jobs:
       # published bytes are the bytes that were uploaded. (The .dmg's checksum
       # used to have to be made on the macOS runner because stock macOS has no
       # sha256sum; the release job is linux, so all three are computed here.)
+      - name: Verify the app can actually verify what we are about to sign
+        # The updater was dead for weeks because CI signed with GPG (.asc)
+        # while the app fetched Ed25519 (.sig) -- two independent breaks that
+        # only surfaced at install time, on a user's machine. This step fails
+        # the release HERE instead: the key in the secret must be present in
+        # PINNED_RELEASE_SIGNING_KEYS, and a real signature must verify
+        # through the app's own code.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, os, subprocess, sys, tempfile, pathlib
+          sys.path.insert(0, "src")
+          from telegram_downloader import _release_verify as rv
+          secret = os.environ.get("RELEASE_SIGNING_KEY", "")
+          st = rv.validate_pinned_keys()
+          if not secret and not st.ok:
+              # No key anywhere: this is an unsigned release (fork builds, or
+              # an operator who has not set signing up yet). That is a
+              # legitimate state -- the app refuses to auto-install these,
+              # which is the correct outcome, not a broken build.
+              print("::notice::No signing key configured; publishing UNSIGNED. "
+                    "The in-app updater will refuse to install it by design.")
+              raise SystemExit(0)
+          if not st.ok:
+              raise SystemExit("release blocked: " + st.summary)
+          print("pinned keyring OK:", st.summary)
+          if not secret:
+              print("no RELEASE_SIGNING_KEY secret; publishing unsigned")
+              raise SystemExit(0)
+          with tempfile.TemporaryDirectory() as td:
+              key = pathlib.Path(td) / "k.pem"
+              key.write_bytes(base64.b64decode(secret))
+              key.chmod(0o600)
+              der = subprocess.run(["openssl", "pkey", "-in", str(key),
+                                    "-pubout", "-outform", "DER"],
+                                   capture_output=True, check=True).stdout
+              pub = base64.b64encode(der[-32:]).decode()
+              signed = rv.key_id_for(der[-32:]) in {
+                  rv.key_id_for(rv.decode_public_key(v))
+                  for v in rv.PINNED_RELEASE_SIGNING_KEYS.values()}
+              if not signed:
+                  raise SystemExit(
+                      "release blocked: the RELEASE_SIGNING_KEY secret's public "
+                      "key is NOT pinned in _release_verify.py, so the app would "
+                      "refuse every download from this release. Pin it, or unset "
+                      "the secret to publish unsigned.")
+              print("signing key matches a pinned public key")
+          PY
       - name: Compute and sign checksum manifests
         env:
           SIGN: ${{ inputs.sign }}
