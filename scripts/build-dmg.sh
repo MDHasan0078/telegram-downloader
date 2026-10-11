@@ -149,6 +149,12 @@ export PIP_FIND_LINKS="$PWD/wheels"
 # requirements-build.lock is already installed, so isolation buys nothing here
 # and only widens the supply chain.
 export PIP_NO_BUILD_ISOLATION=0
+
+# Same stale-cache problem as build-apk.sh, and the same fix: the macOS runner
+# image carries a pre-warmed pub cache that can pin an older jni than the
+# bindings Flet generates require. See the longer note in build-apk.sh.
+rm -rf "${PUB_CACHE:-$HOME/.pub-cache}"
+
 flet build macos --project telegram_downloader.gui --module-name main --yes
 
 # --------------------------------------------- move artifacts out of build/

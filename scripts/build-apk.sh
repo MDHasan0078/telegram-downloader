@@ -158,6 +158,21 @@ export PIP_FIND_LINKS="$PWD/wheels"
 export PIP_NO_BUILD_ISOLATION=0
 export PIP_REQUIRE_VIRTUALENV=false
 
+# Flet generates its own pubspec.yaml and resolves the Dart packages fresh on
+# each build, but it does NOT clear the pub cache first. ubuntu-latest ships
+# a pre-warmed $HOME/.pub-cache holding jni 1.0.0, and pub prefers the cached
+# copy, so the build binds jni 1.0.0 while the bindings Flet generates
+# require ^1.1.0 -- which fails at compile time with a confusing
+# "Constant evaluation error ... generated bindings expect package:jni ^1.1.0,
+# but 1.0.x was imported". jni 1.1.0 is the current release; the cache is
+# simply older than it.
+#
+# Clearing the cache makes pub re-resolve against pub.dev. It costs a
+# re-download of the Dart packages on every run, which is the point: the
+# alternative is a build that silently depends on whatever the runner image
+# happened to bake weeks ago.
+rm -rf "${PUB_CACHE:-$HOME/.pub-cache}"
+
 if [ "${1:-}" = "--debug" ]; then
   flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args=--debug --yes
 else
