@@ -327,31 +327,66 @@ jobs:
   # duplicate release notes.
   release:
     needs: [deb, apk, dmg]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # `always()` so a failed apk/dmg does NOT skip the whole release. The
+    # .deb is the artifact the Linux in-app updater installs, and holding it
+    # hostage to an unrelated upstream Flet/Flutter break (apk and dmg are
+    # currently broken that way) means no release ships at all. The release
+    # still requires deb to have SUCCEEDED -- a broken .deb must never be
+    # published -- and the steps below verify whatever artifacts are present
+    # and refuse to publish a partial or mismatched set.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.deb.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: deb, path: deb }
+      - name: Report which platform builds failed
+        run: |
+          echo "deb:   ${{ needs.deb.result }}"
+          echo "apk:   ${{ needs.apk.result }}"
+          echo "dmg:   ${{ needs.dmg.result }}"
+          if [ "${{ needs.apk.result }}" != "success" ] || [ "${{ needs.dmg.result }}" != "success" ]; then
+            echo "::warning::apk/dmg did not build; publishing the .deb only. The updater installs only .deb on Linux, so this release is still usable."
+          fi
+      # apk/macos are optional: download-artifact fails when the producing job
+      # did not upload anything, so these two are allowed to no-op.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
         with: { name: apk, path: apk }
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
         with: { name: macos, path: macos }
       - name: Verify artifact names
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "release ${VERSION} contents:"
-          ls -la deb apk macos
-          # Exactly one installer per platform.
+          ls -la deb apk macos 2>/dev/null || true
+          # The .deb is REQUIRED -- it is what the Linux updater installs, and
+          # a release without it would be useless to the primary audience.
           [ "$(ls deb/*.deb 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing deb"; exit 1; }
-          [ "$(ls apk/*.apk 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing apk"; exit 1; }
-          [ "$(ls macos/*.dmg 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing dmg"; exit 1; }
-          # Names must be the exact versioned release names the updater expects.
           [ -f "deb/telegram-downloader_${VERSION}_amd64.deb" ] || { echo "unexpected deb filename"; ls -1 deb; exit 1; }
-          [ -f "apk/telegram-downloader_${VERSION}.apk" ] || { echo "unexpected apk filename"; ls -1 apk; exit 1; }
-          [ -f "macos/telegram-downloader_${VERSION}.dmg" ] || { echo "unexpected dmg filename"; ls -1 macos; exit 1; }
+          # apk/dmg are OPTIONAL. When their build job failed nothing is
+          # downloaded, and publishing the platforms that DID build is
+          # correct. When an artifact IS present it must still be exactly one
+          # correctly-named file -- a half-uploaded or misnamed artifact must
+          # never be published, and the "exactly one" check catches the case
+          # where a stale artifact got mixed in.
+          if [ -d apk ]; then
+            n="$(ls apk/*.apk 2>/dev/null | wc -l)"
+            [ "$n" -eq 1 ] || { echo "apk dir present with $n artifacts (expected 0 or 1)"; ls -1 apk; exit 1; }
+            [ -f "apk/telegram-downloader_${VERSION}.apk" ] || { echo "unexpected apk filename"; ls -1 apk; exit 1; }
+          else
+            echo "note: no apk artifact (build job failed); releasing .deb only"
+          fi
+          if [ -d macos ]; then
+            n="$(ls macos/*.dmg 2>/dev/null | wc -l)"
+            [ "$n" -eq 1 ] || { echo "macos dir present with $n artifacts (expected 0 or 1)"; ls -1 macos; exit 1; }
+            [ -f "macos/telegram-downloader_${VERSION}.dmg" ] || { echo "unexpected dmg filename"; ls -1 macos; exit 1; }
+          else
+            echo "note: no dmg artifact (build job failed); releasing .deb only"
+          fi
 # Checksums are computed HERE, not in the jobs that built the artifacts.
       # This job has no checkout, no compiler and no source: it can only
       # download what the build jobs uploaded. A checksum produced by the same
@@ -413,10 +448,29 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          ( cd deb   && sha256sum *.deb > SHA256SUMS-deb )
-          ( cd apk   && sha256sum *.apk > SHA256SUMS-apk )
-          ( cd macos && sha256sum *.dmg > SHA256SUMS-dmg )
+          # Only compute a manifest for a platform whose artifact actually
+          # exists. sha256sum on a missing glob would abort the step, and
+          # publishing a SHA256SUMS-* with no installer beside it is worse
+          # than publishing nothing for that platform.
+          for plat in deb apk dmg; do
+            case "$plat" in
+              deb) dir=deb;   ext=deb ;;
+              apk) dir=apk;   ext=apk ;;
+              dmg) dir=macos; ext=dmg ;;   # the macOS artifact dir is "macos"
+            esac
+            [ -d "$dir" ] || { echo "skipping $plat (no artifact dir)"; continue; }
+            # Match the platform's OWN extension only. Listing all three
+            # patterns makes sha256sum exit non-zero on the two that do not
+            # exist even though it writes the good line first, which under
+            # `set -e` aborts the step.
+            shopt -s nullglob
+            files=( "$dir"/*."$ext" )
+            shopt -u nullglob
+            [ "${#files[@]}" -eq 1 ] || { echo "skipping $plat (${#files[@]} .$ext files, expected 1)"; continue; }
+            ( cd "$dir" && sha256sum "${files[@]##*/}" > "SHA256SUMS-$plat" )
+          done
           for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+            [ -f "$f" ] || continue
             echo "--- $f"; cat "$f"
             ( cd "$(dirname "$f")" && sha256sum -c "$(basename "$f")" )
           done
@@ -441,6 +495,7 @@ jobs:
               | python3 -c 'import hashlib,sys; print(hashlib.sha256(b"tgdl-release-key:"+sys.stdin.buffer.read()).hexdigest()[:8])')"
             echo "release signing key id: $KEYID"
             for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+              [ -f "$f" ] || { echo "no manifest for $f (platform not built)"; continue; }
               dir="$(dirname "$f")"
               base="$(basename "$f")"
               # -rawin = Ed25519 over the message itself (PureEdDSA), which is
@@ -453,8 +508,17 @@ jobs:
             done
             # Fail the release loudly rather than shipping manifests the app
             # will refuse: a signed release that is missing a signature is
-            # indistinguishable from an attack at install time.
-            ls -l deb/SHA256SUMS-deb.sig apk/SHA256SUMS-apk.sig macos/SHA256SUMS-dmg.sig
+            # indistinguishable from an attack at install time. At least one
+            # manifest MUST have been signed -- otherwise this release has no
+            # trust anchor at all and is not worth publishing.
+            signed_count=0
+            for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+              [ -f "$f" ] || continue
+              [ -f "$f.sig" ] || { echo "ERROR: $f has no signature"; exit 1; }
+              ls -l "$f.sig"
+              signed_count=$((signed_count + 1))
+            done
+            [ "$signed_count" -gt 0 ] || { echo "no manifests were signed; refusing to publish"; exit 1; }
           else
             echo "::warning::No RELEASE_SIGNING_KEY secret configured; checksum manifests published UNSIGNED. The in-app updater will refuse to install these (that is intentional, not a bug)."
             echo "no Ed25519 signing key configured; checksum manifests published unsigned" >> "$GITHUB_STEP_SUMMARY"
