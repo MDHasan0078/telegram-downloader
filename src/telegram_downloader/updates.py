@@ -1027,7 +1027,15 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
         # the trusted installer).
         _verify_file_sha256(dest, digest)
         try:
-            dest.chmod(0o600 & ~0x111)
+            # 0o600 -- owner read+write, nothing for group/other.
+            #
+            # This used to read `0o600 & ~0x111`, intending to "remove the
+            # write bits", but 0x111 IS the three user-write bits, so the
+            # mask evaluates to 0o400: WRITE-ONLY, with the read bit
+            # stripped. Every reader then failed, including the app's own
+            # test suite and `apt-get install` on the downloaded .deb.
+            # 0600 is the correct and intended mode for a private file.
+            dest.chmod(0o600)
         except OSError:
             pass
         published = True
