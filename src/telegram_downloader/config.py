@@ -38,6 +38,15 @@ _UMASK_LOCK = threading.RLock()
 # itself.
 MAX_CORRUPT_BACKUPS = 5
 
+# Hard ceiling on config.json. The queue has always had one
+# (queue_store.MAX_QUEUE_BYTES, enforced via fstat on the held fd); config.json
+# did not, so `_read_json_nofollow` ran a bare json.load on whatever was there.
+# Measured: a 200 MB config.json parsed in ~1.0 s, turning a writable config
+# directory into an unbounded allocation / startup stall. config.json holds a
+# handful of short scalars, so anything near this is corruption or an attack,
+# never real data.
+MAX_CONFIG_BYTES = 1024 * 1024
+
 def _sanitize_display(s: str, limit: int = 500) -> str:
     """Strip control chars / ANSI escapes for safe terminal / UI display."""
     if not isinstance(s, str):
@@ -494,6 +503,18 @@ def _read_json_nofollow(path: Path):
     O_NOFOLLOW is unavailable with the target being a symlink (ELOOP).
     """
     fd = _open_regular_readonly(path)
+    try:
+        # fstat on the HELD fd, not path.stat(): closes the TOCTOU where a
+        # 1-byte file is swapped for a 500MB one between check and read.
+        # Same discipline as queue_store's MAX_QUEUE_BYTES gate.
+        if os.fstat(fd).st_size > MAX_CONFIG_BYTES:
+            os.close(fd)
+            fd = -1
+            raise ValueError(
+                f"config file too large (> {MAX_CONFIG_BYTES} bytes); refusing "
+                f"to parse it")
+    except OSError:
+        pass
     try:
         with os.fdopen(fd, "r", encoding="utf-8") as fh:
             fd = -1
