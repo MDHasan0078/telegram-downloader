@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import getpass
 import os
 import secrets
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -41,6 +44,72 @@ def _ask(prompt: str, default: str = "") -> str:
 def _mask_id(value: str) -> str:
     # Fixed mask: a length-proportional mask would disclose the ID length.
     return "***" if str(value or "") else "(not set)"
+
+
+# ffmpeg's own wall-clock ceiling, mirrored from converter's subprocess
+# timeout so the cancel path does not silently drop the 1h guard.
+_FFMPEG_TIMEOUT_S = 3600
+
+
+@contextlib.contextmanager
+def _ffmpeg_cancel_bridge(timeout: float = _FFMPEG_TIMEOUT_S):
+    """Yield the `threading.Event` that makes a blocking ffmpeg cancellable.
+
+    `asyncio.to_thread` cannot cancel work already running in the executor,
+    and `asyncio.run` finishes by *joining* that thread in
+    `shutdown_default_executor()`. Without this bridge the first Ctrl-C is
+    swallowed and only surfaces once ffmpeg exits on its own — up to an hour
+    later — and the caller's `except BaseException: tmp.unlink()` cleanup
+    cannot run until then, stranding the `<stem>.part.<pid>.<hex>.mp4` file.
+
+    ffmpeg_to_mp4 polls this event (same contract as the GUI's cancel path):
+    on set it terminates the child, unlinks the output and raises. SIGINT
+    sets it here; the previous handler is then invoked so asyncio's own
+    Ctrl-C bookkeeping (task cancellation, and the KeyboardInterrupt that
+    becomes exit 130) behaves exactly as it did before.
+    """
+    evt = threading.Event()
+    prev = None
+    installed = False
+
+    def _on_sigint(signum, frame):
+        # Signal the worker FIRST: it is the slow party (up to a 0.2 s poll
+        # tick plus SIGTERM/SIGKILL), so the teardown of ffmpeg and of the
+        # part file must already be in flight before the loop bookkeeping
+        # below unwinds the coroutine.
+        evt.set()
+        # Then chain. asyncio.run installs its own _on_sigint, which cancels
+        # the main task on the first Ctrl-C (surfacing as exit 130 via
+        # _run); swallowing it would turn Ctrl-C into a silent cancel.
+        if callable(prev):
+            prev(signum, frame)
+
+    try:
+        prev = signal.signal(signal.SIGINT, _on_sigint)
+        installed = True
+    except (ValueError, OSError, AttributeError):
+        # Not the main thread, or a platform without signals: skip the
+        # handler but keep the deadline, so we never *lose* the timeout
+        # guard just because Ctrl-C cannot be intercepted here.
+        prev = None
+    watchdog = threading.Timer(timeout, evt.set)
+    watchdog.daemon = True  # never keep the process alive just for the timer
+    watchdog.start()
+    try:
+        yield evt
+    finally:
+        watchdog.cancel()
+        if installed and prev is not None:
+            try:
+                signal.signal(signal.SIGINT, prev)
+            except (ValueError, OSError, TypeError):
+                pass
+        # Belt and braces: on *any* way out of this block — including a
+        # cancellation that never resumed the await — tell the worker to stop.
+        # If it already returned this is a no-op; if it is still in ffmpeg's
+        # poll loop it terminates the child and unlinks the part file, so an
+        # orphan ffmpeg can never outlive the `asyncio.run` executor join.
+        evt.set()
 
 
 def _run(coro) -> int:
@@ -187,19 +256,24 @@ async def _login_cli(client) -> None:
         # caught before Telegram rejects it. Only a bot token is a secret,
         # and it is entered hidden via getpass.
         phone = input("Phone number (international, e.g. +8801XXXXXXXXX): ").strip()
+        # Bind both before branching so the guard below can never trip
+        # NameError, and so the two inputs are obviously mutually exclusive.
+        phone_input = None
         token_input = None
         if tg_client.looks_like_phone(phone) or phone.startswith("+"):
             phone_input = phone
-            token_input = None
         else:
             token_input = getpass.getpass("Pasting a bot token? Enter it hidden:").strip()
             while not token_input:
                 token_input = getpass.getpass("Bot token cannot be empty. Retry hidden:").strip()
-            phone_input = None
     except (EOFError, KeyboardInterrupt):
         print()
         raise RuntimeError("Login cancelled by user.")
-    if not phone and not token_input:
+    # Test the values actually handed to client.start(), not the raw prompt
+    # text. `phone` is non-empty whenever we got here (the user typed a phone
+    # number OR a bot token, and the token branch loops until non-empty), so
+    # `not phone` could never fire and the check protected nothing.
+    if not phone_input and not token_input:
         raise RuntimeError("Phone number or bot token required.")
     try:
         if phone_input is not None:
@@ -311,8 +385,15 @@ async def _download_one(client, url: str, out_dir: Path, mode: str, custom_title
             raise
         print("Converting to MP4...")
         try:
-            # Offload so event loop stays cancellable (was sync 1h block).
-            await asyncio.to_thread(ffmpeg_to_mp4, source, tmp, mode)
+            # Offload so the event loop stays cancellable (was a sync 1h
+            # block), and hand ffmpeg the same threading.Event cancel contract
+            # the GUI uses. The offload alone is NOT enough: asyncio.to_thread
+            # futures cannot be cancelled, and asyncio.run() joins the worker
+            # thread in shutdown_default_executor(), so without the event a
+            # Ctrl-C sat invisible until ffmpeg finished on its own.
+            with _ffmpeg_cancel_bridge() as cancel_evt:
+                await asyncio.to_thread(ffmpeg_to_mp4, source, tmp, mode,
+                                        cancel=cancel_evt)
         except BaseException:
             try:
                 tmp.unlink(missing_ok=True)

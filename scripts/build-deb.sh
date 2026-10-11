@@ -165,13 +165,57 @@ rm -f "$PKG/opt/telegram-downloader/$WHEELDIR/SHA256SUMS"
 # that backend has to exist and has to be the pinned one: Python >= 3.12's
 # ensurepip no longer installs setuptools at all, and letting pip fetch
 # `setuptools>=68` at build time is the exact unpinned-execution path above.
-if ! python3 -c 'import setuptools' >/dev/null 2>&1; then
-  echo "==> installing pinned build backend"
-  pip install --require-hashes --only-binary :all: --no-cache-dir \
-    -r requirements-build.lock
+#
+# This install is UNCONDITIONAL and its failure is fatal. It used to be guarded
+# by `if ! python3 -c 'import setuptools'`, which is backwards for the thing it
+# was protecting: the runner image always has an importable setuptools, so the
+# guard was false exactly when it mattered and the .deb was built with whatever
+# version ubuntu-latest happened to ship that week. "Some setuptools exists" is
+# not the requirement; "this setuptools is the one in requirements-build.lock"
+# is, so check that instead of checking for existence.
+#
+# `python3 -m pip` rather than bare `pip`: it is the one guaranteed to belong to
+# the same interpreter that will import the backend, which is the whole basis of
+# the --no-build-isolation argument above. A bare `pip` can be a different
+# interpreter's (or a venv's), in which case the pin lands somewhere the build
+# never looks.
+echo "==> installing pinned build backend"
+if ! python3 -m pip install --require-hashes --only-binary :all: --no-cache-dir \
+     -r requirements-build.lock; then
+  echo "build-deb.sh: could not install the pinned build backend from" >&2
+  echo "  requirements-build.lock. Refusing to fall back to whatever setuptools" >&2
+  echo "  this machine happens to have: --no-build-isolation would then build" >&2
+  echo "  the shipped .deb with an unpinned, unverified backend." >&2
+  exit 1
 fi
+
+# Prove the pin actually took, rather than trusting that the install above
+# landed where the build reads from. Both the version and the import path have
+# to match requirements-build.lock, otherwise the wheel below is still built by
+# whatever `import setuptools` finds first.
+python3 - <<'PY' || exit 1
+import re, sys, pathlib, subprocess
+lock = pathlib.Path("requirements-build.lock").read_text()
+m = re.search(r"^setuptools==([^\s\\]+)", lock, re.M)
+if not m:
+    sys.stderr.write("build-deb.sh: no setuptools== pin in requirements-build.lock\n")
+    sys.exit(1)
+pinned = m.group(1)
+actual = subprocess.run(
+    [sys.executable, "-c",
+     "import setuptools;print(setuptools.__version__, setuptools.__file__)"],
+    capture_output=True, text=True, check=True).stdout.split()
+if actual[0] != pinned:
+    sys.stderr.write(
+        "build-deb.sh: the build backend in use is setuptools "
+        f"{actual[0]} ({actual[1]}), but requirements-build.lock pins "
+        f"{pinned}.\n  The shipped .deb would be built by an unpinned backend.\n")
+    sys.exit(1)
+print(f"==> build backend is the pinned setuptools {pinned} ({actual[1]})")
+PY
+
 echo "==> building project wheel (no build isolation)"
-pip wheel --no-deps --no-build-isolation --no-cache-dir \
+python3 -m pip wheel --no-deps --no-build-isolation --no-cache-dir \
   -w "$PKG/opt/telegram-downloader/$WHEELDIR" . 2>&1 | tail -2
 
 PROJ_WHEELS=( "$PKG/opt/telegram-downloader/$WHEELDIR"/telegram_downloader-*.whl )

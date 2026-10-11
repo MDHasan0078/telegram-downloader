@@ -18,7 +18,22 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = [
-  "telethon>=1.36,<2",
+  # EXACT pin, not a range, and the reason is specific to how the mobile and
+  # desktop artifacts are built. `flet build apk` / `flet build macos` do not
+  # run pip over this project: they hand this list verbatim to serious_python,
+  # which spawns `pip install --upgrade --only-binary :all: ... <this list>`
+  # against PyPI with no --require-hashes. A range therefore means one tag can
+  # ship telethon 1.45.0 inside the .deb (pinned by requirements-runtime.lock +
+  # wheels/) and telethon 1.46.0 inside the .apk/.dmg, resolved at build time
+  # from whoever published that release first.
+  #
+  # An exact `==` still leaves the download unverified -- only a serious_python
+  # change can close that -- but it removes the version drift, which is the part
+  # that silently made the three artifacts disagree. scripts/build-apk.sh and
+  # scripts/build-dmg.sh assert that this pin equals the one in
+  # requirements-runtime.lock and the one vendored in wheels/, so it cannot go
+  # stale unnoticed. Bump it here, there and in wheels/ together.
+  "telethon==1.45.0",
 ]
 
 [project.optional-dependencies]

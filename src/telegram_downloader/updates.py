@@ -26,6 +26,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,6 +50,10 @@ API_HOSTS = {"api.github.com", "github.com"}
 ASSET_HOSTS = {"github.com", "objects.githubusercontent.com",
                "release-assets.githubusercontent.com"}
 MAX_ASSET_BYTES = 800 * 1024 ** 2
+# Releases-API JSON. A real release lists a handful of assets (~8 KiB); this
+# is deliberately ~30x that, and still small enough that a hostile endpoint
+# cannot use the update check as an unbounded memory sink.
+MAX_RELEASE_JSON_BYTES = 256 * 1024
 
 
 @dataclass
@@ -190,6 +195,40 @@ def _urlopen_no_redirect(req: urllib.request.Request, timeout: int,
         raise
 
 
+def _read_capped(resp, cap: int, what: str) -> bytes:
+    """Read at most *cap* bytes from *resp*, raising if the body is larger.
+
+    Every other body in this module is capped (MAX_CHECKSUM_BYTES, the
+    signature, the payload); the releases-API JSON used to be the one read
+    that a hostile or hijacked endpoint could stream into memory without
+    bound. Refuse on a declared oversize *before* buffering anything, then
+    ask for one byte more than the cap and reject if it came back.
+
+    Tolerates response-like objects that do not expose `headers` or whose
+    `read()` takes no size argument (stand-ins, some wrappers): both only
+    remove the early/length hints, the bounded `read(cap + 1)` is what
+    actually enforces the limit — and every real urllib response accepts
+    the argument.
+    """
+    headers = getattr(resp, "headers", None)
+    declared = headers.get("Content-Length") if headers is not None else None
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except (TypeError, ValueError):
+            raise ValueError(f"Bad Content-Length in {what}: {declared!r}")
+        if declared_size > cap:
+            raise ValueError(
+                f"{what} too large (declared {declared_size} bytes); refusing.")
+    try:
+        body = resp.read(cap + 1)
+    except TypeError:
+        body = resp.read()
+    if len(body) > cap:
+        raise ValueError(f"{what} exceeded the {cap}-byte cap; refusing.")
+    return body
+
+
 _VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+\Z")
 # Bound to our repo: any other owner/repo must not open as a trusted update.
 # Use \Z not $ to block trailing \n injection. ASCII [0-9] only — never \d,
@@ -257,11 +296,24 @@ def _installed_version_parts(value: str) -> tuple[int, int, int] | None:
 
 
 def _implausible_jump(current: str, latest: str) -> str | None:
-    """Return a reason string if *latest* is an implausible jump from *current*."""
+    """Return a reason string if *latest* is an implausible jump from *current*.
+
+    Fail-closed on an unparseable *current*: the whole point of this filter is
+    to suppress "v99.99.99 is available", and the only way to decide whether
+    that is plausible is to know what is installed. An unknown current version
+    used to mean "no bound could be computed" and silently returned None — but
+    the caller passed `current or latest` to get there, i.e. f(x, x), which is
+    plausible by definition: the filter evaporated exactly when the attacker
+    (or a broken packaging job) could not name the installed version. Refuse
+    the update instead. check_for_update() already returned None for an
+    unparseable *latest*; this makes the other half symmetric.
+    """
     cur = _installed_version_parts(current)
     lat = _parse_version(latest)
-    if cur is None or lat is None:
-        return None  # caller already shape-checked both; don't double-guard
+    if lat is None:
+        return "release version could not be parsed"
+    if cur is None:
+        return "installed version could not be parsed"
     if lat[0] > cur[0] + MAX_MAJOR_STEP:
         return "major-version jump"
     if lat[0] == cur[0] and lat[1] > cur[1] + MAX_MINOR_STEP:
@@ -348,7 +400,10 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
 
     Fails closed on an update the installed version could not plausibly jump
     to, and refuses to move backwards from the last version this install was
-    shown (see _implausible_jump / _record_last_seen_version).
+    shown (see _implausible_jump / _record_last_seen_version). An installed
+    version that cannot be parsed at all is the same case: there is no floor
+    to check the new version against, so no update is offered (the GUI/CLI
+    both render None as "could not reach the update server").
     """
     if repo != REPO:
         return None
@@ -358,6 +413,9 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
         try:
             from . import __version__ as current_version
         except Exception:
+            # Unknowable installed version — deliberately NOT "assume we are
+            # current": _implausible_jump fails closed on an unparseable
+            # current version, so no update is offered rather than every one.
             current_version = ""
     try:
         headers: dict[str, str] = {
@@ -373,7 +431,11 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
                                   allowed_hosts=API_HOSTS) as resp:
             if resp.status != 200:
                 return None
-            data = json.loads(resp.read().decode("utf-8"))
+            # Size-capped like every other body read here: the release JSON
+            # arrives from the network and must not be an unbounded sink.
+            data = json.loads(_read_capped(resp, MAX_RELEASE_JSON_BYTES,
+                                           "release metadata")
+                              .decode("utf-8"))
         assets = []
         for a in (data.get("assets") or []):
             raw_url = a.get("browser_download_url") or ""
@@ -434,7 +496,10 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
             return None
         if last_seen_parts is not None and latest_parts < last_seen_parts:
             return None  # downgrade / replay
-        if _implausible_jump(current_version or latest_version, latest_version):
+        # No `or latest_version` fallback here: that made the call f(x, x) —
+        # always plausible — so an unparseable installed version silently
+        # switched the filter OFF. _implausible_jump now fails closed instead.
+        if _implausible_jump(current_version, latest_version):
             return None
         if (installed_parts is not None and latest_parts > installed_parts
                 and (last_seen_parts is None or latest_parts > last_seen_parts)):
@@ -530,13 +595,61 @@ def _parse_sums(body: bytes) -> dict[str, str]:
     return out
 
 
-def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30,
-                    token: str | None = None) -> dict[str, str]:
-    """Download SHA256SUMS-<plat> for a release tag. Returns {filename: hexdigest}.
+# An unsigned {filename: digest} mapping that REFUSES to be used as if it were
+# verified. _fetch_checksum() used to return a bare dict, indistinguishable
+# from _fetch_verified_sums()'s return value: `sums = _fetch_checksum(...)`
+# reads exactly like `sums = _fetch_verified_sums(...)` and only a comment
+# said not to use it. A future caller who skims past the comment gets TLS-only
+# trust for an installer and never notices. The type now makes the mistake loud
+# (no .get(), so `sums.get(name)` raises) and `verified` is False so nothing
+# can assert it is true.
+class UnverifiedSums(Mapping):
+    """READ-ONLY, SIGNATURE-CHECK-NOT-PERFORMED digest mapping.
 
-    NOTE: this parses the manifest but does NOT check its signature. Anything
-    installing a binary must use _fetch_verified_sums() instead; this function
-    stays unsigned-only so a caller cannot mistake it for verification.
+    An instance proves nothing about who published the release. Do NOT use it
+    to gate an installer download — use _fetch_verified_sums(), which
+    verifies the manifest's Ed25519 signature before returning a plain dict.
+    """
+
+    verified = False
+
+    def __init__(self, sums: dict[str, str]):
+        self._sums = dict(sums)
+
+    def __getitem__(self, key):
+        return self._sums[key]
+
+    def __iter__(self):
+        return iter(self._sums)
+
+    def __len__(self):
+        return len(self._sums)
+
+    def __repr__(self):
+        return (f"UnverifiedSums(UNVERIFIED, do-not-install-from: "
+                f"{sorted(self._sums)})")
+
+    def __bool__(self):
+        return bool(self._sums)
+
+    def get(self, *_a, **_k):  # noqa: D102
+        raise AttributeError(
+            "UnverifiedSums has no .get(): these digests are not signature-"
+            "verified and must not gate an install. Use "
+            "_fetch_verified_sums(), which verifies the manifest signature.")
+
+
+def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30,
+                    token: str | None = None) -> "UnverifiedSums":
+    """Download SHA256SUMS-<plat> UNVERIFIED. Diagnostic use only.
+
+    *** THIS DOES NOT VERIFY THE MANIFEST'S SIGNATURE. ***
+    *** NEVER use the result to decide whether to install a binary. ***
+
+    Returns an UnverifiedSums, not a dict, precisely so that a caller cannot
+    mistake it for _fetch_verified_sums()'s verified result: it has no .get(),
+    its repr shouts UNVERIFIED, and UnverifiedSums.verified is False. If you
+    are installing anything, you want _fetch_verified_sums().
 
     Fail-closed: any problem raises — a compromised/mirrored release must
     never silently skip verification.
@@ -545,7 +658,7 @@ def _fetch_checksum(checksum_name: str, tag_version: str, timeout: int = 30,
         raise ValueError(f"Refusing unexpected checksum name: {checksum_name!r}")
     body = _fetch_release_file(checksum_name, tag_version, timeout=timeout,
                                token=token, max_bytes=MAX_CHECKSUM_BYTES)
-    return _parse_sums(body)
+    return UnverifiedSums(_parse_sums(body))
 
 
 def _fetch_verified_sums(checksum_name: str, tag_version: str, timeout: int = 30,
@@ -604,6 +717,83 @@ def _verify_file_sha256(path, digest: str) -> None:
             _os.close(fd)
         except OSError:
             pass
+
+
+def _unlink_quietly(path) -> None:
+    """Remove *path*, never raising and never following a symlink.
+
+    Used only for files this module just created. os.unlink() removes the
+    directory entry itself, so a planted symlink named like our temp file
+    loses the link, not whatever it points at. Best-effort on purpose: a
+    cleanup failure must not replace the real error (or the return value)
+    with a secondary one.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+# Exactly the shape download_asset() mints: <installer>.part.<pid>.<16 hex>.
+# Derived from _ASSET_NAME_RE (anchor stripped) so it can never drift away
+# from the names we actually create. Nothing else in a download folder is
+# ever a candidate for deletion.
+_STALE_PART_RE = re.compile(
+    _ASSET_NAME_RE.pattern[:-len(r"\Z")]
+    + r"\.part\.[0-9]{1,10}\.[0-9a-f]{16}\Z")
+# A leftover younger than this may belong to an updater that is running
+# *right now* in another window/process, so it is never touched.
+STALE_PART_MIN_AGE = 3600.0
+# At most this many directory entries are examined per sweep, and at most one
+# sweep per this many seconds: the sweep runs inside download_asset() and must
+# not turn every update check into a directory walk.
+STALE_SWEEP_INTERVAL = 300.0
+STALE_SWEEP_MAX_ENTRIES = 64
+_last_stale_sweep = 0.0
+
+
+def _sweep_stale_parts(directory) -> None:
+    """Delete abandoned `<installer>.part.*` files left by killed runs.
+
+    download_asset() cleans up after itself, but a SIGKILL, a power cut or a
+    process killed by the OS leaves the partial file in the user's Downloads
+    folder, where a later "open folder" step can offer them a binary that was
+    never verified. Safety rules, all of them deliberate:
+
+      * only names matching our own `.part.<pid>.<hex>` shape are considered,
+        so an unrelated user file is never a candidate;
+      * symlinks are never followed and never unlinked-through (we skip them);
+      * anything younger than STALE_PART_MIN_AGE is left alone, so a
+        concurrent download in another process is never truncated;
+      * bounded by entry count, time-based rate-limited, and every single
+        error is swallowed — a sweep can never fail a download.
+    """
+    global _last_stale_sweep
+    import time as _time
+    # NB: wall clock, not monotonic — it is compared against st_mtime.
+    now = _time.time()
+    if now - _last_stale_sweep < STALE_SWEEP_INTERVAL:
+        return
+    _last_stale_sweep = now  # set first: a failing sweep still rate-limits
+    try:
+        with os.scandir(str(directory)) as entries:
+            for i, entry in enumerate(entries):
+                if i >= STALE_SWEEP_MAX_ENTRIES:
+                    return
+                if not _STALE_PART_RE.match(entry.name):
+                    continue
+                try:
+                    # follow_symlinks=False everywhere: a planted symlink is
+                    # neither a candidate nor a thing we read through.
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    if now - entry.stat(follow_symlinks=False).st_mtime < STALE_PART_MIN_AGE:
+                        continue
+                    os.unlink(entry.path)
+                except OSError:
+                    continue
+    except OSError:
+        return
 
 
 def open_release_page(url: str) -> None:
@@ -749,6 +939,9 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
     except OSError:
         resolved_dd = dest_dir.absolute()
     resolved_dd.mkdir(parents=True, exist_ok=True)
+    # Sweep leftovers of runs that were killed before they could clean up.
+    # Done BEFORE we mint our own tmp name so we can never race ourselves.
+    _sweep_stale_parts(resolved_dd)
     dest = resolved_dd / name
     # Random-suffix tmp + O_NOFOLLOW|O_EXCL: no predictable-name symlink plant.
     nofollow = getattr(_os, "O_NOFOLLOW", 0)
@@ -766,8 +959,19 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
     total = 0
     import time as _time
     deadline = _time.monotonic() + 3600  # hard stop for a slow/hung CDN stream
-    fd = _os.open(tmp, _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | nofollow, 0o600)
+    # One try/finally around EVERYTHING from the first byte to the last
+    # chmod. The promise in the comment below ("a rejected installer must not
+    # sit in the destination dir") used to be kept by enumerating the
+    # exceptions we expected — so an OSError out of _verify_file_sha256, an
+    # OSError out of tmp.replace(), or a KeyboardInterrupt/cancellation during
+    # hashing each left the whole payload behind as
+    # `<installer>.part.<pid>.<hex>`. A finally cannot be forgotten by the
+    # next failure mode that gets added, so that is what carries the cleanup.
+    fd = -1
+    renamed = False     # tmp has been moved onto dest
+    published = False   # dest is the verified installer; leave it alone
     try:
+        fd = _os.open(tmp, _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | nofollow, 0o600)
         with _urlopen_no_redirect(req, timeout=60, token=token or None) as resp:
             declared = resp.headers.get("Content-Length")
             if declared is not None:
@@ -789,54 +993,41 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
                     if _time.monotonic() > deadline:
                         raise ValueError("Asset download exceeded the time budget; aborted.")
                     fh.write(chunk)
-    except BaseException:
+        try:
+            if tmp.is_symlink():
+                raise ValueError("Refusing to publish through symlink tmp file.")
+        except OSError:
+            # Cannot even stat it, so we cannot prove it is not a symlink:
+            # fail closed (the finally below removes whatever is there).
+            raise
+        _harden(tmp)
+        _verify_file_sha256(tmp, digest)
+        tmp.replace(dest)
+        renamed = True
+        # Re-verify the PUBLISHED file through O_NOFOLLOW: closes the window
+        # where tmp was swapped after the checksum pass (a planted symlink or
+        # replaced inode right before rename would otherwise present itself as
+        # the trusted installer).
+        _verify_file_sha256(dest, digest)
+        try:
+            dest.chmod(0o600 & ~0x111)
+        except OSError:
+            pass
+        published = True
+        return dest
+    finally:
         if fd != -1:
             try:
                 _os.close(fd)
             except OSError:
                 pass
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    try:
-        if tmp.is_symlink():
-            tmp.unlink()
-            raise ValueError("Refusing to publish through symlink tmp file.")
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    _harden(tmp)
-    try:
-        _verify_file_sha256(tmp, digest)
-    except ValueError:
-        # Leave nothing behind: a rejected installer must not sit in the
-        # destination dir where the user (or a later "open folder" step) could
-        # pick it up.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    tmp.replace(dest)
-    # Re-verify the PUBLISHED file through O_NOFOLLOW: closes the window
-    # where tmp was swapped after the checksum pass (a planted symlink or
-    # replaced inode right before rename would otherwise present itself as
-    # the trusted installer).
-    try:
-        _verify_file_sha256(dest, digest)
-    except ValueError:
-        try:
-            dest.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    try:
-        dest.chmod(0o600 & ~0o111)
-    except OSError:
-        pass
-    return dest
+        if not published:
+            # Leave nothing behind: a rejected installer must not sit in the
+            # destination dir where the user (or a later "open folder" step)
+            # could pick it up — on every failure mode, not just the
+            # ValueErrors we thought of when this was written.
+            _unlink_quietly(tmp)
+            # Only ours: `renamed` proves dest is this run's file and not a
+            # good installer left by an earlier successful download.
+            if renamed:
+                _unlink_quietly(dest)

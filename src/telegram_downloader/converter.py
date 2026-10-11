@@ -55,6 +55,23 @@ def _reap(proc: subprocess.Popen) -> None:
             continue
 
 
+def _human_seconds(seconds: float) -> str:
+    """Render the converter deadline the way the message always has ("1h")."""
+    return f"{seconds / 3600:g}h" if seconds >= 3600 else f"{seconds:g}s"
+
+
+def _drop_output(output_path: Path) -> None:
+    """Delete a partial MP4, never masking the error that caused the drop.
+
+    Used by every failure path of ffmpeg_to_mp4: a leftover part file is
+    indistinguishable from a finished download on the next run.
+    """
+    try:
+        output_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def has_ffmpeg() -> bool:
     return _bin("ffmpeg") is not None
 
@@ -124,7 +141,8 @@ def ffprobe_has_video(path: Path) -> bool:
 
 
 def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
-                  cancel: Optional[threading.Event] = None) -> None:
+                  cancel: Optional[threading.Event] = None,
+                  timeout: float = 3600) -> None:
     """Create MP4 (remux when H.264/AAC-compatible, else re-encode).
 
     Writes only to *output_path*; callers should pass a `.part.mp4` temp
@@ -133,6 +151,10 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
     If *cancel* is supplied, ffmpeg runs under a Popen poll loop; setting
     the event kills the process (child-friendly SIGTERM, then SIGKILL) and
     raises RuntimeError("...cancelled...").
+
+    *timeout* (seconds) bounds both branches. The Popen branch has no
+    subprocess timeout to inherit, so it carries its own deadline: a caller
+    that never sets *cancel* must not be able to hang here forever.
     """
     exe = _bin("ffmpeg")  # single resolve: same path checked and exec'd
     if not exe:
@@ -160,44 +182,47 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
                "-c:v", "libx264", "-preset", preset, "-crf", "28",
                "-c:a", "aac", "-b:a", "128k",
                "-movflags", "+faststart", "--", str(output_path)]
+    proc: Optional[subprocess.Popen] = None
     try:
-        if cancel is not None:
-            proc = subprocess.Popen(cmd)
-            while proc.poll() is None:
-                if cancel.is_set():
-                    # _reap terminates, then kills; never leaks a zombie or
-                    # an orphaned ffmpeg that keeps holding the part file.
-                    _reap(proc)
-                    try:
-                        output_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+        try:
+            if cancel is not None:
+                proc = subprocess.Popen(cmd)
+                deadline = time.monotonic() + timeout
+                while proc.poll() is None:
+                    if cancel.is_set():
+                        raise RuntimeError(
+                            f"Conversion cancelled; source kept at {input_path}")
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(cmd, timeout)
+                    _sleep(0.2)
+                if proc.returncode != 0:
                     raise RuntimeError(
-                        f"Conversion cancelled; source kept at {input_path}")
-                _sleep(0.2)
-            if proc.returncode != 0:
-                try:
-                    output_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise RuntimeError(
-                    f"FFmpeg processing failed; source kept at {input_path} "
-                    f"(exit {proc.returncode})")
-        else:
-            subprocess.run(cmd, check=True, timeout=3600)
-    except subprocess.TimeoutExpired as exc:
-        try:
-            output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"FFmpeg timed out after 1h; source kept at {input_path}") from exc
-    except (subprocess.CalledProcessError, OSError) as exc:
-        try:
-            output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(f"FFmpeg processing failed; source kept at {input_path} ({exc})") from exc
+                        f"FFmpeg processing failed; source kept at {input_path} "
+                        f"(exit {proc.returncode})")
+            else:
+                subprocess.run(cmd, check=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"FFmpeg timed out after {_human_seconds(timeout)}; "
+                f"source kept at {input_path}") from exc
+        except (subprocess.CalledProcessError, OSError) as exc:
+            raise RuntimeError(
+                f"FFmpeg processing failed; source kept at {input_path} ({exc})") from exc
+    except BaseException:
+        # One cleanup for EVERY failure path — cancel, deadline, non-zero
+        # exit, OSError, or anything else raised inside the poll loop (a
+        # KeyboardInterrupt delivered to this thread, a MemoryError in the
+        # callback): keep the source, drop the half-written output. The old
+        # per-branch cleanup only covered TimeoutExpired/CalledProcessError/
+        # OSError, so any other exception stranded the .part file.
+        _drop_output(output_path)
+        # And never leave the child behind: `proc.poll()` reaps a dead one,
+        # `_reap` terminates-then-kills a live one. subproc.run() already
+        # does this internally; the Popen branch had to do it by hand and
+        # only did so on the cancel path.
+        if proc is not None and proc.poll() is None:
+            _reap(proc)
+        raise
     # Verification gate. Three outcomes must stay distinct, because treating
     # them alike deleted *valid* output:
     #   * ffprobe not installed  -> cannot verify; trust ffmpeg's exit status
@@ -209,10 +234,7 @@ def ffmpeg_to_mp4(input_path: Path, output_path: Path, mode: str = "2",
     src_had_video = probe_codecs(input_path)[0] is not None
     if not ffprobe_has_video(output_path):
         if src_had_video:
-            try:
-                output_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _drop_output(output_path)
             raise RuntimeError(
                 f"FFmpeg reported success but the MP4 could not be verified: {output_path}\n"
                 f"The source file was kept at: {input_path}"

@@ -14,6 +14,12 @@
 #   2. the toolchain is installed from requirements-flet.lock with
 #      --require-hashes. `pip install flet[all]==0.86.5` pins only the
 #      top-level name and floats the ~50 distributions under it.
+#   3. the vendored wheel set is verified UNCONDITIONALLY. Flet does not run
+#      pip over this project -- it hands pyproject's dependency list to
+#      serious_python, which resolves it against PyPI with no hash check. That
+#      resolution cannot be closed from here (see the PIP_FIND_LINKS comment
+#      below), so what is left is to pin the version and to make every artifact
+#      built from one commit agree on it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,22 +51,104 @@ if [ "$PYV" != "3.12" ]; then
   echo "  Install Python 3.12 and re-run, or regenerate the lock for $PYV." >&2
   exit 1
 fi
-for f in requirements-flet.lock requirements-build.lock; do
+# requirements-runtime.lock is in this list because the cross-check below reads
+# it: without it there is no second opinion on which telethon the .deb ships.
+for f in requirements-flet.lock requirements-build.lock requirements-runtime.lock; do
   [ -f "$f" ] || { echo "build-apk.sh: $f is missing." >&2; exit 1; }
 done
 echo "==> installing hash-pinned build toolchain"
 pip install --require-hashes --only-binary :all: \
   -r requirements-flet.lock -r requirements-build.lock
 
+# ----------------------------------------------------- vendored wheel trust root
+# PIP_FIND_LINKS below turns wheels/ into an install SOURCE for the dependency
+# resolution serious_python performs, so it is verified before anything reads
+# it. This block is unconditional on purpose: it used to be wrapped in
+# `if [ -f wheels/SHA256SUMS ]`, which meant deleting a single file silently
+# removed every check. A guard that an unprivileged checkout edit can switch off
+# is not a guard, and this is the same trust root scripts/build-deb.sh refuses
+# to build without.
+SELF="$(basename "$0")"
+WHEELDIR="wheels"
+[ -d "$WHEELDIR" ] && [ -f "$WHEELDIR/SHA256SUMS" ] || {
+  echo "$SELF: $WHEELDIR/ and $WHEELDIR/SHA256SUMS are both required." >&2
+  echo "  They are the vendored runtime closure, and PIP_FIND_LINKS below" >&2
+  echo "  installs from them. A missing manifest means no build, not a skip." >&2
+  exit 1
+}
+echo "==> verifying vendored wheels against $WHEELDIR/SHA256SUMS"
+( cd "$WHEELDIR" && sha256sum -c --quiet SHA256SUMS ) || {
+  echo "$SELF: vendored wheel checksum mismatch in $WHEELDIR/" >&2
+  exit 1
+}
+# Two-way completeness, for the same reason scripts/build-deb.sh does it: with
+# PIP_FIND_LINKS set, pip will happily select a wheel that the manifest never
+# mentions, so "every listed wheel verified" does not mean "every available
+# wheel verified".
+UNMANIFESTED="$( cd "$WHEELDIR" && comm -13 \
+  <(awk '{print $2}' SHA256SUMS | sort) <(ls -1 ./*.whl 2>/dev/null | sed 's#^\./##' | sort) )"
+[ -z "$UNMANIFESTED" ] || {
+  echo "$SELF: wheels present but absent from SHA256SUMS:" >&2
+  printf '  %s\n' $UNMANIFESTED >&2
+  exit 1
+}
+MISSING_WHEEL="$( cd "$WHEELDIR" && comm -23 \
+  <(awk '{print $2}' SHA256SUMS | sort) <(ls -1 ./*.whl 2>/dev/null | sed 's#^\./##' | sort) )"
+[ -z "$MISSING_WHEEL" ] || {
+  echo "$SELF: SHA256SUMS references files that are not present:" >&2
+  printf '  %s\n' $MISSING_WHEEL >&2
+  exit 1
+}
+
+# The one dependency this build cannot pin for itself. `flet build apk` does
+# not install this project with pip; it hands pyproject's dependency list to
+# serious_python, which resolves it against PyPI at build time with no
+# --require-hashes. Assert the three artifacts agree on the version so the .apk
+# cannot silently differ from the .deb built from the same commit.
+python3 - "$SELF" <<'PY' || exit 1
+import re, sys, pathlib, glob
+script = sys.argv[1]
+def die(msg):
+    sys.stderr.write(f"{script}: {msg}\n")
+    sys.exit(1)
+m = re.search(r'^\s*"telethon\s*==\s*([0-9][^"]*)"',
+              pathlib.Path("pyproject.toml").read_text(), re.M)
+if not m:
+    die("pyproject.toml must pin telethon with an exact ==.\n"
+        "  `flet build apk` hands this list to serious_python, which resolves it\n"
+        "  against PyPI with no --require-hashes, so a range is a floating\n"
+        "  version that can differ from the .deb built from the same commit.")
+pinned = m.group(1)
+lm = re.search(r"^telethon==([^\s\\]+)",
+               pathlib.Path("requirements-runtime.lock").read_text(), re.M)
+if not lm:
+    die("requirements-runtime.lock pins no telethon; cannot cross-check.")
+if lm.group(1) != pinned:
+    die(f"pyproject.toml pins telethon=={pinned} but requirements-runtime.lock "
+        f"pins telethon=={lm.group(1)}. The .deb and the .apk would ship "
+        f"different code from one commit.")
+found = glob.glob(f"wheels/telethon-{pinned}-*.whl")
+if len(found) != 1:
+    die(f"wheels/ holds {len(found)} telethon=={pinned} wheels, expected 1 "
+        f"(vendored set is out of sync with pyproject.toml).")
+print(f"==> telethon=={pinned} agrees across pyproject.toml, "
+      f"requirements-runtime.lock and wheels/")
+PY
+
 # ------------------------------------------------------------------- building
-# pyaes ships sdist-only; the runtime closure is vendored in wheels/ and
-# verified by requirements-runtime.lock. Flet only needs to be able to *see* it.
-if [ -f wheels/SHA256SUMS ]; then
-  ( cd wheels && sha256sum -c --quiet SHA256SUMS ) || {
-    echo "build-apk.sh: vendored wheel checksum mismatch in wheels/" >&2
-    exit 1
-  }
-fi
+# PIP_FIND_LINKS is load-bearing, not decorative: pyaes (a Telethon dependency)
+# is published as an sdist ONLY, and serious_python passes `--only-binary :all:`
+# for Android, so without this the build cannot install pyaes at all.
+#
+# It does NOT, however, make the install hermetic. The env var is inherited by
+# the pip that serious_python spawns (verified: flet merges os.environ, Dart's
+# Process.start defaults to includeParentEnvironment:true), but PIP_FIND_LINKS
+# is *additive* to the index -- everything else still comes from PyPI, unhash-
+# checked. `--no-index` cannot be used here: wheels/ holds manylinux x86_64
+# wheels, and pip is run under a sitecustomize that reports the platform as
+# android-24-<abi>, so msgpack has no compatible vendored artifact and
+# `--no-index` fails outright. The exact telethon== pin above is what closes
+# what CAN be closed without a serious_python change.
 export PIP_FIND_LINKS="$PWD/wheels"
 # Flet shells out to pip for the project's own dependencies. Left at its
 # default, pip builds in an isolated env and *downloads a fresh setuptools from
