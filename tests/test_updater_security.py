@@ -702,7 +702,7 @@ def test_u3_download_asset_refuses_cross_repo_url(tmp_path):
     assert not (tmp_path / "d" / INSTALLER).exists()
 
 
-def test_u3_cdn_redirect_still_allowed(github, release_files,
+def test_u3_cdn_redirect_still_allowed(tmp_path, github, release_files,
                                        signed_release):
     """Repo-pinning must not break the github.com -> CDN 302 GitHub really does."""
     seed, label, public = signed_release
@@ -711,12 +711,12 @@ def test_u3_cdn_redirect_still_allowed(github, release_files,
     cdn = f"https://release-assets.githubusercontent.com/assets/{INSTALLER}"
     github.redirect(github.download_path(rel["version"], INSTALLER), cdn)
     github.route(f"/assets/{INSTALLER}", rel["payload"])
-    out = upd.download_asset(_asset(rel["version"]), dest_dir="/tmp/tgdl-cdn",
+    out = upd.download_asset(_asset(rel["version"]), dest_dir=tmp_path,
                              tag_version=rel["version"])
     assert Path(out).read_bytes() == rel["payload"]
 
 
-def test_u3_cross_repo_redirect_refused(github, release_files,
+def test_u3_cross_repo_redirect_refused(tmp_path, github, release_files,
                                         signed_release):
     seed, label, public = signed_release
     rel = release_files()
@@ -724,7 +724,7 @@ def test_u3_cross_repo_redirect_refused(github, release_files,
     github.redirect(github.download_path(rel["version"], INSTALLER),
                     "https://evil.example/x.deb")
     with pytest.raises(Exception):
-        upd.download_asset(_asset(rel["version"]), dest_dir="/tmp/tgdl-evil",
+        upd.download_asset(_asset(rel["version"]), dest_dir=tmp_path,
                            tag_version=rel["version"])
 
 
@@ -873,8 +873,8 @@ def test_u5_api_redirect_to_allowlisted_host_followed():
                                     "https://evil.example/b") is None
 
 
-def test_u5_token_not_sent_by_default(github, release_files, signed_release,
-                                      monkeypatch):
+def test_u5_token_not_sent_by_default(tmp_path, github, release_files,
+                                      signed_release, monkeypatch):
     seed, label, public = signed_release
     rel = release_files()
     github.publish_release(rel["version"], rel["files"])
@@ -886,7 +886,7 @@ def test_u5_token_not_sent_by_default(github, release_files, signed_release,
         return real(req, *a, **k)
 
     monkeypatch.setattr(upd, "_urlopen_no_redirect", spy)
-    upd.download_asset(_asset(rel["version"]), dest_dir="/tmp/tgdl-tok1",
+    upd.download_asset(_asset(rel["version"]), dest_dir=tmp_path,
                        tag_version=rel["version"], token="secret-token")
     for headers in seen:
         assert "Authorization" not in headers
