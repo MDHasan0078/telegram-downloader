@@ -407,7 +407,9 @@ def _read_legacy() -> dict:
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         try:
             # O_NOFOLLOW: never migrate secrets from a planted symlink.
-            fd = os.open(LEGACY_CONFIG, os.O_RDONLY | nofollow)
+            # _open_regular_readonly also refuses a FIFO planted here, which
+            # would otherwise block this read until a writer appeared.
+            fd = _open_regular_readonly(LEGACY_CONFIG)
             try:
                 with os.fdopen(fd, "r", encoding="utf-8") as fh:
                     fd = -1
@@ -434,14 +436,64 @@ def _read_legacy() -> dict:
     return values
 
 
+def _open_regular_readonly(path: Path) -> int:
+    """Open *path* read-only, refusing anything that is not a regular file.
+
+    `os.open(path, O_RDONLY)` BLOCKS FOREVER on a FIFO (named pipe) until some
+    other process opens the other end for writing. A single `mkfifo
+    config.json` in the config directory therefore wedged `tg-dl config show`,
+    `tg-dl config path` and `tg-dl preview` indefinitely — verified: a 10s
+    timeout expired with exit 124 and no output. The `S_ISREG` check that
+    existed further down the old read path could never help, because it only
+    ran AFTER an open that, for a FIFO, never returns.
+
+    Two defences, belt and braces:
+      * O_NONBLOCK makes the open of a FIFO return immediately instead of
+        blocking (it fails with ENXIO when there is no writer, rather than
+        waiting for one);
+      * fstat on the returned fd decides, because only the descriptor we
+        actually hold can be trusted — a lstat beforehand would be a TOCTOU
+        window the attacker could swap a regular file for a pipe inside.
+
+    O_NOFOLLOW is preserved so a symlinked config is still refused with ELOOP
+    rather than silently followed.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, os.O_RDONLY | nofollow | nonblock)
+    try:
+        import stat as _stat
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise OSError(
+                f"Refusing to read {path}: not a regular file "
+                f"(mode {oct(st.st_mode)}). A FIFO or device here would "
+                f"block startup forever or expose host data.")
+        # O_NONBLOCK survives into the fd; clear it so normal reads behave.
+        try:
+            import fcntl
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~nonblock)
+        except (ImportError, OSError, ValueError):
+            # No fcntl (Windows) or fcntl refused: O_NONBLOCK only affects
+            # open/pipe semantics, not regular-file reads, so this is safe.
+            pass
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    return fd
+
+
 def _read_json_nofollow(path: Path):
     """JSON-load a file via O_NOFOLLOW|O_RDONLY (never through a symlink).
 
     Returns the parsed object, or raises OSError on platform where
     O_NOFOLLOW is unavailable with the target being a symlink (ELOOP).
     """
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, os.O_RDONLY | nofollow)
+    fd = _open_regular_readonly(path)
     try:
         with os.fdopen(fd, "r", encoding="utf-8") as fh:
             fd = -1
@@ -473,9 +525,9 @@ def _backup_corrupt_config() -> dict:
         while dest.exists() and n < MAX_CORRUPT_BACKUPS:
             n += 1
             dest = CONFIG_DIR / f"config.json.corrupt-{stamp}-{n}.bak"
-        data = os.open(CONFIG_JSON, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        bfd = _open_regular_readonly(CONFIG_JSON)
         try:
-            with os.fdopen(data, "rb") as fh:
+            with os.fdopen(bfd, "rb") as fh:
                 raw = fh.read(1024 * 1024)
         finally:
             pass
@@ -627,7 +679,7 @@ def session_path_str() -> str:
         try:
             if session_file.exists():
                 with umask_077():
-                    dfd = os.open(session_file, os.O_RDONLY | nofollow)
+                    dfd = _open_regular_readonly(session_file)
                 try:
                     os.fstat(dfd)  # reaches here only if not a symlink
                 finally:

@@ -147,9 +147,13 @@ class QueueStore:
             if self.path.exists():
                 # O_NOFOLLOW open + fstat: closes the check-then-read swap
                 # window (a link planted after is_symlink() raises ELOOP).
+                # The shared helper also refuses a FIFO: O_RDONLY on a named
+                # pipe blocks until a writer appears, which would wedge the
+                # whole app on a single planted mkfifo.
                 nofollow = getattr(os, "O_NOFOLLOW", 0)
                 try:
-                    fd = os.open(self.path, os.O_RDONLY | nofollow)
+                    from .config import _open_regular_readonly
+                    fd = _open_regular_readonly(self.path)
                 except OSError as exc:
                     import errno as _errno
                     if exc.errno == _errno.ELOOP:
