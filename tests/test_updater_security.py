@@ -920,7 +920,20 @@ def test_u5_no_retry_without_token(github):
     assert github.request_count() == 1
 
 
-def test_u5_no_retry_on_other_status(github):
+def test_u5_retries_404_because_the_repo_is_private(github):
+    """404 must be retried WITH a token -- this repo is private.
+
+    GitHub answers 404, not 403, to an unauthenticated request for a private
+    repository, deliberately, so that its existence is not disclosed. The old
+    policy retried only on 403/429, which meant the updater could never read
+    its OWN releases: with a valid token the same request succeeded via curl
+    and gh while check_for_update() returned None. Reproduced end to end
+    before this was fixed.
+
+    The retry is still bounded to one attempt and still only ever sends the
+    token to an allowlisted host, so this widens WHEN a token is used, not
+    WHERE it can go.
+    """
     path = "/repos/%s/releases/latest" % REPO
     github.route(path, (404, {}, ""))
     req = upd.urllib.request.Request(
@@ -929,7 +942,25 @@ def test_u5_no_retry_on_other_status(github):
         with upd._urlopen_no_redirect(req, timeout=5, token="tok-abc",
                                       allowed_hosts=upd.API_HOSTS):
             pass
-    assert github.request_count() == 1, "must not retry a 404"
+    assert github.request_count() == 2, (
+        "a 404 must be retried exactly once with the token")
+
+
+def test_u5_no_retry_on_other_status(github):
+    """A status a credential cannot fix must NOT be retried.
+
+    Guards the bound: retrying everything would send the token at GitHub for
+    no reason on every malformed request.
+    """
+    path = "/repos/%s/releases/latest" % REPO
+    github.route(path, (500, {}, ""))
+    req = upd.urllib.request.Request(
+        f"https://api.github.com{path}", headers={"User-Agent": "x"})
+    with pytest.raises(urllib.error.HTTPError):
+        with upd._urlopen_no_redirect(req, timeout=5, token="tok-abc",
+                                      allowed_hosts=upd.API_HOSTS):
+            pass
+    assert github.request_count() == 1, "must not retry a 500"
 
 
 def test_u5_token_never_appears_in_errors(github, tmp_path):

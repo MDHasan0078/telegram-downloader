@@ -166,11 +166,19 @@ def _urlopen_no_redirect(req: urllib.request.Request, timeout: int,
                          allowed_hosts: set[str] | None = None):
     """Open *req* with proxies off and allowlisted-only redirects.
 
-    Token policy: the repo is PUBLIC, so no credential is sent on the first
-    attempt (nothing to leak if this ever points at the wrong host). A token
-    is retried exactly once, and only when GitHub answers 403/429 (rate limit
-    / quota), which is the only case it can help with. The token is never
-    logged and never appears in an error message.
+    Token policy: no credential is sent on the first attempt (nothing to leak
+    if this ever points at the wrong host). A token is retried exactly once,
+    and only when GitHub answers a status a token can actually help with.
+    The token is never logged and never appears in an error message.
+
+    404 belongs in that retry set. This repository is PRIVATE, and GitHub
+    deliberately answers 404 -- not 403 -- for an unauthenticated request to
+    a private repo, so that its existence is not disclosed. Retrying only on
+    403/429 therefore meant the updater could NEVER read its own releases:
+    verified with a valid token, the same request succeeded via curl and gh
+    while check_for_update() returned None. The retry still sends the token
+    only to an allowlisted host, so this widens *when* a token is used, not
+    *where* it can go.
     """
     allowed = ASSET_HOSTS if allowed_hosts is None else allowed_hosts
 
@@ -189,7 +197,9 @@ def _urlopen_no_redirect(req: urllib.request.Request, timeout: int,
     try:
         return _open(None)
     except urllib.error.HTTPError as exc:
-        if token and exc.code in (403, 429):
+        # 403/429 = rate limited or forbidden; 404 = the private-repo
+        # concealment status. Both are "try once with a credential".
+        if token and exc.code in (403, 404, 429):
             exc.close()
             return _open(token)
         raise
