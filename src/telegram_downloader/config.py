@@ -197,6 +197,63 @@ def _mkdir_parents_nofollow(target: Path, mode: int = 0o700) -> None:
             pass
 
 
+def _refuse_foreign_config_dir() -> None:
+    """Abort if CONFIG_DIR (or its parent) is not safely ours.
+
+    `_base_config_dir()` applies exactly these checks to XDG_CONFIG_HOME --
+    the PARENT -- but nothing ever checked CONFIG_DIR itself, which is where
+    api_id, api_hash and the Telethon session key actually land. The old
+    `_ensure_dirs()` only *chmod*'d it and swallowed the failure, so a
+    pre-existing world-writable directory owned by another user was accepted
+    silently: verified with an unprivileged victim writing its Telegram API
+    hash into a 0777 directory owned by uid 60001, which stayed 0777 because
+    the victim cannot chmod someone else's directory.
+
+    That is not a hypothetical: whoever owns the directory controls every
+    entry in it, so they can swap config.json wholesale or rename a valid
+    session into place underneath us. Refuse rather than warn.
+
+    Self-owned permissive directories are still repaired to 0700 by the
+    caller's chmod -- that path works and is preserved. Only the cases we
+    genuinely cannot fix (wrong owner, or a chmod we are not permitted to
+    perform) abort here.
+    """
+    for path in (CONFIG_DIR.parent, CONFIG_DIR):
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue          # not created yet; _mkdir_parents_nofollow makes it
+        except OSError as exc:
+            raise RuntimeError(f"Refusing unsafe config dir {path}: {exc}") from exc
+        import stat as _stat
+        if _stat.S_ISLNK(st.st_mode):
+            raise RuntimeError(f"Refusing unsafe config dir {path}: it is a symlink.")
+        if os.name == "posix":
+            if st.st_uid != os.getuid():
+                raise RuntimeError(
+                    f"Refusing unsafe config dir {path}: it is owned by uid "
+                    f"{st.st_uid}, not by this user (uid {os.getuid()}). Another "
+                    f"user can read or replace the Telegram credentials and "
+                    f"session stored there. Move it aside or fix its ownership; "
+                    f"refusing to continue.")
+            if st.st_mode & 0o022:
+                # Repairable only if it is ours. Try to tighten it now and
+                # re-check, so an ordinary self-owned 0775/0777 leftover does
+                # not become a hard failure.
+                try:
+                    os.chmod(path, 0o700)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Refusing unsafe config dir {path}: it is group/world "
+                        f"writable ({oct(st.st_mode & 0o777)}) and cannot be "
+                        f"tightened ({exc}).") from exc
+                st = os.lstat(path)
+                if st.st_mode & 0o022:
+                    raise RuntimeError(
+                        f"Refusing unsafe config dir {path}: still group/world "
+                        f"writable after chmod ({oct(st.st_mode & 0o777)}).")
+
+
 def _ensure_dirs() -> None:
     _refuse_config_symlink()
     # symlink-safe mkdir -p for CONFIG_DIR
@@ -206,6 +263,9 @@ def _ensure_dirs() -> None:
         # No permissive fallback: a symlink-plant refusal must abort,
         # never silently follow the link with plain mkdir.
         raise RuntimeError(f"Refusing unsafe config dir {CONFIG_DIR}: {exc}") from exc
+    # After the mkdir, so a directory we just created ourselves is never
+    # rejected for the state it was born with.
+    _refuse_foreign_config_dir()
     for p in {CONFIG_DIR, CONFIG_DIR.resolve()}:
         try:
             p.chmod(0o700)
@@ -394,14 +454,67 @@ def _read_json_nofollow(path: Path):
                 pass
 
 
+def _backup_corrupt_config() -> dict:
+    """Preserve an unparseable config.json before it is overwritten.
+
+    QueueStore.load() already backs a corrupt queue up to `.corrupt-*.bak`
+    and starts clean; config.json used to be swallowed to `{}` and then
+    overwritten by the next save_settings with NO backup at all -- silently
+    destroying the user's api_id/api_hash with no way to recover them. Keep
+    the same bounded, 0600 backup discipline so a config the user can
+    hand-repair survives the app that rejected it.
+
+    Never raises: a backup failure must not stop the app from starting.
+    """
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = CONFIG_DIR / f"config.json.corrupt-{stamp}.bak"
+        n = 0
+        while dest.exists() and n < MAX_CORRUPT_BACKUPS:
+            n += 1
+            dest = CONFIG_DIR / f"config.json.corrupt-{stamp}-{n}.bak"
+        data = os.open(CONFIG_JSON, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            with os.fdopen(data, "rb") as fh:
+                raw = fh.read(1024 * 1024)
+        finally:
+            pass
+        tmp = dest.with_name(dest.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, raw)
+        finally:
+            os.close(fd)
+        os.replace(tmp, dest)
+        # Bound the pile-up so a repeatedly-corrupt config cannot fill the
+        # disk by itself, oldest first (same rule as the queue backups).
+        backups = sorted(CONFIG_DIR.glob("config.json.corrupt-*.bak"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in backups[MAX_CORRUPT_BACKUPS:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
 def load_settings() -> Settings:
     _ensure_dirs()
     data: dict = {}
     if CONFIG_JSON.exists():
         try:
             data = _read_json_nofollow(CONFIG_JSON)
-        except (OSError, ValueError):
-            data = {}
+        except (OSError, ValueError, TypeError, RuntimeError):
+            # RuntimeError covers RecursionError, which json.load raises
+            # directly on adversarial nesting -- QueueStore.load() already
+            # catches it for exactly this reason. Without it a deeply nested
+            # config.json escaped as a raw traceback out of `tg-dl config
+            # show` and killed the GUI outright. Corruption must degrade to
+            # defaults, never crash startup.
+            data = _backup_corrupt_config()
         if not isinstance(data, dict):
             data = {}
     else:
