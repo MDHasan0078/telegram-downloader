@@ -179,12 +179,19 @@ __all__ = [
 PINNED_RELEASE_SIGNING_KEYS: dict[str, str] = {
     # Public half only. The private key lives in the RELEASE_SIGNING_KEY
     # repository secret and has never been in this repository, a log, or a
-    # build artifact. Key id e2967ea3 (see key_id_for).
+    # build artifact. Key id 6e61864d (see key_id_for).
+    #
+    # A PREVIOUS key (id e2967ea3) was pinned earlier and removed: it was
+    # generated inside a Codespace whose /tmp was wiped by a container
+    # rebuild, so the private half was destroyed. Keeping it pinned would
+    # have meant CI refusing to sign anything while advertising a trust
+    # anchor that can never be used. Rotate keys by adding the new entry and
+    # only dropping the old one once nothing still needs it to verify.
     #
     # Keep retired keys listed for as long as releases signed by them must
     # still install, then remove them — but never remove a key while users
     # can still be downloading an artifact it signed.
-    "ed25519:2026-10": "A23NIl1j5JhcS2SPMrDIQH6zaO8MdGifmJ2iSVMHkbE=",
+    "ed25519:2026-10": "gXMoUhMJjdLJqESBNDNgYBnKwg8vjnao4r7CidGjbG0=",
 }
 
 # Asset suffix of the detached Ed25519 signature next to each manifest:
