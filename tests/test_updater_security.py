@@ -391,13 +391,37 @@ def test_rfc8032_vector1_public_key():
     assert _public_key(bytes.fromhex(_RFC8032_SEED)).hex() == _RFC8032_PUBLIC
 
 
-def test_shipped_keyring_is_empty_and_fails_closed():
-    """Loud, intentional: no key is pinned yet, so nothing verifies."""
-    assert rv.PINNED_RELEASE_SIGNING_KEYS == {}, (
-        "A release signing key was pinned without wiring CI (see the TODO in "
-        "_release_verify.py). If this is deliberate, update this test.")
-    with pytest.raises(rv.NoPinnedSigningKeyError):
+def test_shipped_keyring_is_usable_and_fails_closed():
+    """A key IS pinned now, and every failure mode still fails closed.
+
+    This test used to assert the keyring was EMPTY, as a tripwire against
+    pinning a key before CI could sign with it. CI now emits the Ed25519
+    `SHA256SUMS-<plat>.sig` this module actually parses (the release job
+    signs them and refuses to publish a signed release with no signature),
+    so the tripwire has served its purpose.
+
+    What must stay true regardless of keyring contents: the shipped keyring
+    is VALIDATED (not merely present), and a bogus signature against it is
+    refused rather than waved through. Pinned-but-unusable would be worse
+    than empty -- it looks configured while refusing every real release.
+    """
+    status = rv.validate_pinned_keys()
+    assert status.ok, f"shipped keyring is not usable: {status.summary} {status.problems}"
+    assert rv.PINNED_RELEASE_SIGNING_KEYS, "no release signing key is pinned"
+
+    # A pinned keyring must not turn a forged/bogus signature into a pass.
+    with pytest.raises(rv.BadSignatureError):
         rv.verify_manifest_signature(b"x" * 8, b"\x00" * 64)
+
+
+def test_empty_keyring_still_fails_closed():
+    """The fail-closed property is about the CODE, not the current keyring.
+
+    A future operator who empties PINNED_RELEASE_SIGNING_KEYS (e.g. rotating
+    keys) must get a refusal, never a silent acceptance.
+    """
+    with pytest.raises(rv.NoPinnedSigningKeyError):
+        rv.verify_manifest_signature(b"x" * 8, b"\x00" * 64, keys={})
 
 
 def test_verify_manifest_signature_rejects_unknown_key():

@@ -176,7 +176,16 @@ __all__ = [
 # SHA256SUMS-<plat>.asc manifests, and `_release_verify.py` never reads them.
 # If GPG is preferred for some other artifact, pin that key's fingerprint
 # instead and do not add a permissive OpenPGP parser here.
-PINNED_RELEASE_SIGNING_KEYS: dict[str, str] = {}
+PINNED_RELEASE_SIGNING_KEYS: dict[str, str] = {
+    # Public half only. The private key lives in the RELEASE_SIGNING_KEY
+    # repository secret and has never been in this repository, a log, or a
+    # build artifact. Key id e2967ea3 (see key_id_for).
+    #
+    # Keep retired keys listed for as long as releases signed by them must
+    # still install, then remove them — but never remove a key while users
+    # can still be downloading an artifact it signed.
+    "ed25519:2026-10": "A23NIl1j5JhcS2SPMrDIQH6zaO8MdGifmJ2iSVMHkbE=",
+}
 
 # Asset suffix of the detached Ed25519 signature next to each manifest:
 #   SHA256SUMS-deb      (signed document)
