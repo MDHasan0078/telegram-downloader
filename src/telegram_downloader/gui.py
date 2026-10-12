@@ -97,7 +97,7 @@ def _page_service(page, cls):
     return svc
 
 
-def run_gui(port=None):
+def run_gui(port=None, view=None):
     import flet as ft
 
     settings = load_settings()
@@ -2713,7 +2713,12 @@ def run_gui(port=None):
         page.add(layout_row)
 
     import flet as ft
-    if port:
+    # `view` exists so the GUI can be served over HTTP on a headless machine
+    # (Codespaces, CI, a container): without it flet opens a desktop window
+    # and dies when there is no display. Left None, behaviour is unchanged.
+    if view is not None:
+        ft.app(target=_main, port=port, view=view)
+    elif port:
         ft.app(target=_main, port=port)
     else:
         ft.app(target=_main)
