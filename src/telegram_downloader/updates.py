@@ -276,19 +276,21 @@ _CHECKSUM_NAMES = {
 _CHECKSUM_NAME_RE = re.compile(r"^SHA256SUMS-(deb|apk|dmg)\Z")
 MAX_CHECKSUM_BYTES = 64 * 1024
 
-# --- U4 anti-downgrade / plausibility -------------------------------------
-# The tag is authenticated only by TLS + the pinned API host, so a hostile (or
-# hijacked) endpoint can still answer with a perfectly well-formed tag. What
-# it cannot do without being obvious is answer with v99.99.99: "Version
-# v99.99.9 is available" plus a (signed!) installer is a strong social
-# engineering lever. These bounds are deliberately generous for a real 1.x
-# release train and only kill absurd jumps. They are a sanity filter, NOT a
-# security boundary — the signature check is.
-MAX_MAJOR_STEP = 1        # 1.2.3 -> 2.0.0 is plausible, -> 3.0.0 is not
-MAX_MINOR_STEP = 10       # within one major: 1.2 -> 1.12 ok, -> 1.99 not
-MAX_PATCH_STEP = 100      # within one minor: 1.2.0 -> 1.2.100 ok, -> 1.2.900 no
-MAX_RELATIVE_JUMP = 10.0  # never claim >10x the installed version at once
-_STATE_FILENAME = "update-state.json"
+# --- U4 anti-downgrade / plausibility: DISABLED (see commit ce7e0fd) -------
+# The plausible-jump bounds and the last-seen-version replay memory were
+# removed to match simple-yt-downloader's simpler updater. They are recoverable
+# with `git show ce7e0fd`, whose message records what was kept and why; that
+# history is a better record than commented-out code, which cannot be
+# half-restored and silently rots.
+#
+# What this costs: a hostile API response can now offer an absurd but
+# well-formed tag such as v99.99.99, and there is no memory of the highest
+# version previously offered, so a replayed OLDER-but-genuinely-signed release
+# is not refused (UpdateInfo.is_newer_than compares against the INSTALLED
+# version, not against what was last shown). What it does NOT cost: install
+# safety. download_asset() still verifies the Ed25519 manifest signature and
+# the payload digest before any installer byte is fetched, and
+# tests/test_structural_regressions.py pins that ordering.
 
 
 def _parse_version(value: str) -> tuple[int, int, int] | None:
@@ -298,160 +300,31 @@ def _parse_version(value: str) -> tuple[int, int, int] | None:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-# _installed_version_parts - commented out to match simple-yt style.
-# Re-enable by removing the leading "# " from every line below.
-# def _installed_version_parts(value: str) -> tuple[int, int, int] | None:
-#     """Like _parse_version but tolerates a dev/local suffix (1.2.0.dev3).
-#
-#     Used only for the *installed* version, so a development build does not
-#     silently lose the anti-downgrade floor. The strict parser still guards
-#     everything that arrives over the network.
-#     """
-#     parts = _parse_version(value)
-#     if parts is not None:
-#         return parts
-#     m = re.match(r"^v?([0-9]+)\.([0-9]+)\.([0-9]+)", (value or "").strip())
-#     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
-
-
-# _implausible_jump - commented out to match simple-yt style.
-# Re-enable by removing the leading "# " from every line below.
-# def _implausible_jump(current: str, latest: str) -> str | None:
-#     """Return a reason string if *latest* is an implausible jump from *current*.
-#
-#     Fail-closed on an unparseable *current*: the whole point of this filter is
-#     to suppress "v99.99.99 is available", and the only way to decide whether
-#     that is plausible is to know what is installed. An unknown current version
-#     used to mean "no bound could be computed" and silently returned None — but
-#     the caller passed `current or latest` to get there, i.e. f(x, x), which is
-#     plausible by definition: the filter evaporated exactly when the attacker
-#     (or a broken packaging job) could not name the installed version. Refuse
-#     the update instead. check_for_update() already returned None for an
-#     unparseable *latest*; this makes the other half symmetric.
-#     """
-#     cur = _installed_version_parts(current)
-#     lat = _parse_version(latest)
-#     if lat is None:
-#         return "release version could not be parsed"
-#     if cur is None:
-#         return "installed version could not be parsed"
-#     if lat[0] > cur[0] + MAX_MAJOR_STEP:
-#         return "major-version jump"
-#     if lat[0] == cur[0] and lat[1] > cur[1] + MAX_MINOR_STEP:
-#         return "minor-version jump"
-#     if lat[0] == cur[0] and lat[1] == cur[1] and lat[2] > cur[2] + MAX_PATCH_STEP:
-#         return "patch-version jump"
-#     current_units = cur[0] * 1_000_000 + cur[1] * 1_000 + cur[2]
-#     latest_units = lat[0] * 1_000_000 + lat[1] * 1_000 + lat[2]
-#     if current_units > 0 and latest_units > current_units * MAX_RELATIVE_JUMP:
-#         return "absurdly large percentage jump"
-#     return None
-
-
-# _update_state_path - commented out to match simple-yt style.
-# Re-enable by removing the leading "# " from every line below.
-# def _update_state_path(state_path=None) -> Path:
-#     """Local last-seen-version file.
-#
-#     Deliberately NOT in Settings: config.py is owned by another change-set and
-#     adding a persisted field there is out of scope for this fix. The guard
-#     therefore works from a small local state file next to config.json. If it
-#     is missing/unreadable we simply lose the downgrade memory — we never lose
-#     the plausibility bounds, and we never fail open on an update decision
-#     because a state file was missing.
-#     """
-#     if state_path is not None:
-#         return Path(state_path)
-#     from .config import CONFIG_DIR
-#     return Path(CONFIG_DIR) / _STATE_FILENAME
-
-
-# _last_seen_version - commented out to match simple-yt style.
-# Re-enable by removing the leading "# " from every line below.
-# def _last_seen_version(state_path=None) -> str | None:
-#     """Last version this install was shown. None if unknown/hostile file."""
-#     path = _update_state_path(state_path)
-#     try:
-#         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-#     except (OSError, ValueError):
-#         return None
-#     try:
-#         raw = os.read(fd, 512)
-#     except OSError:
-#         return None
-#     finally:
-#         try:
-#             os.close(fd)
-#         except OSError:
-#             pass
-#     try:
-#         text = json.loads(raw.decode("utf-8")).get("last_seen_version")
-#     except Exception:
-#         return None
-#     text = str(text or "")
-#     return text if _VERSION_RE.match(text) else None
-
-
-# _record_last_seen_version - commented out to match simple-yt style.
-# Re-enable by removing the leading "# " from every line below.
-# def _record_last_seen_version(version: str, state_path=None) -> None:
-#     """Persist *version* atomically through O_NOFOLLOW. Best-effort: never raises
-#     into the update flow (losing the memory is survivable; bricking the
-#     updater is not)."""
-#     if not _VERSION_RE.match(str(version or "")):
-#         return
-#     path = _update_state_path(state_path)
-#     payload = json.dumps({"last_seen_version": version}).encode()
-#     fd = None
-#     try:
-#         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-#         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-#                      | getattr(os, "O_NOFOLLOW", 0), 0o600)
-#         os.write(fd, payload)
-#     except OSError:
-#         pass
-#     finally:
-#         if fd is not None:
-#             try:
-#                 os.close(fd)
-#             except OSError:
-#                 pass
-
-
 def check_for_update(repo: str = REPO, timeout: int = 10,
-                     token: str | None = None,
-                     current_version: str | None = None,
-                     state_path=None) -> UpdateInfo | None:
+                     token: str | None = None) -> UpdateInfo | None:
     """Return UpdateInfo or None (offline / no releases / rate-limited).
     Never raises.
 
-    Compares versions with UpdateInfo.is_newer_than(), matching
-    simple-yt-downloader: a plain component-wise numeric compare. Note this is
-    numeric per component, not a string sort, so 2.10.0 correctly beats 2.9.9.
+    This function does NOT compare versions. It fetches the latest release,
+    validates the tag shape, the host, the repo-pinned asset URLs and the
+    asset filenames, and returns whatever the API said. Deciding whether that
+    is actually an update is the CALLER's job, via UpdateInfo.is_newer_than()
+    — a component-wise numeric compare, so 2.10.0 correctly beats 2.9.9
+    (gui.py's settings screen and cli.py's `update` command each call it).
 
-    The U4 anti-downgrade / anti-social-engineering guards (plausible-jump
-    bounds, last-seen replay memory, and the state file they need) are
-    DISABLED — their implementations are commented out above, to be restored
-    by deleting the leading "# ". Consequences while disabled: a well-formed
-    but absurd version such as v99.99.99 from a hijacked API is reported
-    rather than suppressed, and there is no memory of a previously-shown
-    version to refuse a replayed downgrade against. Neither weakens install
-    safety: the tag must still be v<semver>, must live on this repo's
-    releases, and download_asset() still verifies the Ed25519 manifest
-    signature and the payload digest before any byte is installed.
+    Consequence worth stating plainly, since this is where the removed U4
+    guards used to act: an absurd but well-formed tag such as v99.99.99 from a
+    hijacked API is returned, not suppressed, and there is no memory of the
+    highest version previously offered, so a replayed OLDER-but-signed release
+    is not refused here. That does not weaken install safety — the tag must
+    still be v<semver> on this repo's releases, and download_asset() verifies
+    the Ed25519 manifest signature and the payload digest before any byte is
+    installed.
     """
     if repo != REPO:
         return None
     if token is None:
         token = os.environ.get("GITHUB_TOKEN") or ""
-    if current_version is None:
-        try:
-            from . import __version__ as current_version
-        except Exception:
-            # Unknowable installed version — deliberately NOT "assume we are
-            # current": _implausible_jump fails closed on an unparseable
-            # current version, so no update is offered rather than every one.
-            current_version = ""
     try:
         headers: dict[str, str] = {
             "User-Agent": "telegram-downloader",
@@ -513,21 +386,6 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
             f"telegram-downloader_{tag_ver}.apk",
         }
         assets = [a for a in assets if a.name in expected]
-        # --- U4 anti-downgrade / anti-social-engineering (COMMENTED OUT to match simple-yt style) ---
-        # Kept for easy re-enabling if needed in the future; simple-yt just does simple semver compare.
-        # latest_parts = _parse_version(latest_version)
-        # installed_parts = (_installed_version_parts(current_version)
-        #                    if current_version else None)
-        # last_seen_parts = _parse_version(_last_seen_version(state_path))
-        # if latest_parts is None:
-        #     return None
-        # if last_seen_parts is not None and latest_parts < last_seen_parts:
-        #     return None  # downgrade / replay
-        # if _implausible_jump(current_version, latest_version):
-        #     return None
-        # if (installed_parts is not None and latest_parts > installed_parts
-        #         and (last_seen_parts is None or latest_parts > last_seen_parts)):
-        #     _record_last_seen_version(latest_version, state_path)
         return UpdateInfo(latest_version=latest_version,
                           release_url=release_url,
                           assets=assets)
