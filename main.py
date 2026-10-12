@@ -1,4 +1,4 @@
-"""Flet build entry point for the packaged GUI (APK / DMG / MSIX).
+"""Flet build entry point for the packaged GUI (APK / DEB).
 
 The `flet build` tool expects `<module-name>.py` at the project root
 (default `main.py`). This shim adds the `src/` layout to the path and

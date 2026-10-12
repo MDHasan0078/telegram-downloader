@@ -7,16 +7,9 @@ on:
       sign:
         description: >-
           Sign artifacts with the release keys, but only for the platforms whose
-          secrets are configured (Ed25519 for the checksum manifests, Developer ID for
-          the .dmg, upload keystore for the .apk). Skipped silently when the
-          secret is absent so forks build unsigned.
-        type: boolean
-        default: true
-      notarize:
-        description: >-
-          Additionally submit the .dmg to Apple's notary service and staple the
-          ticket. Requires APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
-          APPLE_TEAM_ID in addition to the Developer ID certificate.
+          secrets are configured (Ed25519 for the checksum manifests, upload
+          keystore for the .apk). Skipped silently when the secret is absent so
+          forks build unsigned.
         type: boolean
         default: true
 
@@ -259,132 +252,21 @@ jobs:
           path: |
             dist/apk/*.apk
 
-  # --------------------------------------------------------------------- dmg
-  dmg:
-    needs: test
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Stamp version from tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$VERSION" || { echo "bad tag version '$VERSION'"; exit 1; }
-          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
-          sed -i '' "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
-          grep -E "^version = \"$VERSION\"$" pyproject.toml
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with: { python-version: "3.12" }
-      - name: Pin build timestamps
-        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
-      # create-dmg ships no release artifacts and `brew install create-dmg`
-      # tracks whatever the formula says today, so the tool that builds the
-      # .dmg was floating. Fetch one pinned commit and verify its bytes.
-      - name: Install pinned create-dmg
-        run: |
-          set -euo pipefail
-          CREATE_DMG_SHA=bb9ea3194e55f2f76a821e87541513748d0fedc69f45cf4f0951cad15ae0cae5
-          CREATE_DMG_COMMIT=a2b71d0fda6d0df2a86dc7f67082d4d73e84c59f
-          curl -fsSL "https://raw.githubusercontent.com/create-dmg/create-dmg/$CREATE_DMG_COMMIT/create-dmg" \
-            -o "$RUNNER_TEMP/create-dmg"
-          echo "$CREATE_DMG_SHA  $RUNNER_TEMP/create-dmg" | shasum -a 256 -c -
-          chmod +x "$RUNNER_TEMP/create-dmg"
-          sudo install -m 0755 "$RUNNER_TEMP/create-dmg" /usr/local/bin/create-dmg
-          create-dmg --version || true
-      - name: Detect signing secrets
-        env:
-          SIGN: ${{ inputs.sign }}
-          CERT: ${{ secrets.APPLE_CODESIGN_CERT_P12_BASE64 }}
-          NOTARIZE: ${{ inputs.notarize }}
-          APPLE_ID_S: ${{ secrets.APPLE_ID }}
-        run: |
-          if [ "$SIGN" != "false" ] && [ -n "${CERT:-}" ]; then
-            echo "HAS_CODESIGN=true" >> "$GITHUB_ENV"
-          else
-            echo "no Developer ID certificate; .dmg will be un-notarized" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ "$NOTARIZE" != "false" ] && [ -n "${APPLE_ID_S:-}" ]; then
-            echo "HAS_NOTARY=true" >> "$GITHUB_ENV"
-          fi
-      # build-dmg.sh installs Flet from requirements-flet.lock with
-      # --require-hashes; Flet's build/macos output is moved to dist/macos.
-      - run: chmod +x scripts/build-dmg.sh && ./scripts/build-dmg.sh
-      # An un-notarized .dmg is quarantined by Gatekeeper, which teaches users
-      # to click through the OS's own integrity control — the one defence that
-      # still works when the release account is compromised. Best-effort.
-      - name: Codesign app bundle
-        if: env.HAS_CODESIGN == 'true'
-        env:
-          CERT_P12_BASE64: ${{ secrets.APPLE_CODESIGN_CERT_P12_BASE64 }}
-          CERT_P12_PASSWORD: ${{ secrets.APPLE_CODESIGN_CERT_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          APP=(dist/macos/*.app)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security set-keychain-settings -lut 21600 build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          printf '%s' "$CERT_P12_BASE64" | base64 -d --infile=- > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k build.keychain \
-            -P "$CERT_P12_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s \
-            -k "$KEYCHAIN_PASSWORD" build.keychain
-          security list-keychains -d user -s build.keychain login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning | sed -n 's/.*"\(.*\)"/\1/p' | head -1)"
-          test -n "$IDENTITY" || { echo "no codesigning identity in keychain"; exit 1; }
-          codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "${APP[0]}"
-          codesign --verify --deep --strict --verbose=2 "${APP[0]}"
-          rm -f "$RUNNER_TEMP/cert.p12"
-      - name: Package versioned .dmg
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          APP=(dist/macos/*.app)
-          test -d "${APP[0]}" || { echo "no .app bundle in dist/macos"; ls -R dist; exit 1; }
-          create-dmg --volname "Telegram Downloader" \
-            "dist/telegram-downloader_${VERSION}.dmg" "${APP[0]}"
-          ls -la dist/
-      - name: Notarize and staple .dmg
-        if: env.HAS_NOTARY == 'true' && startsWith(github.ref, 'refs/tags/v')
-        env:
-          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
-          NOTARY_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          DMG="dist/telegram-downloader_${VERSION}.dmg"
-          xcrun notarytool store-credentials tgd-notary \
-            --apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$NOTARY_TEAM_ID"
-          xcrun notarytool submit "$DMG" --keychain-profile tgd-notary --wait
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
-          spctl -a -t open --context context:primary-signature -v "$DMG"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          name: macos
-          path: |
-            dist/*.dmg
-
   # ----------------------------------------------------------------- release
-  # Single release job: the three build jobs upload their artifacts; this job
+  # Single release job: the build jobs upload their artifacts; this job
   # downloads them, computes the checksums, and attaches everything to the tag
   # in ONE step. Previously each job called softprops/action-gh-release
   # concurrently, which raced on creating the release (422) and produced
   # duplicate release notes.
   release:
-    needs: [deb, apk, dmg]
-    # `always()` so a failed apk/dmg does NOT skip the whole release. The
-    # .deb is the artifact the Linux in-app updater installs, and holding it
-    # hostage to an unrelated upstream Flet/Flutter break (apk and dmg are
-    # currently broken that way) means no release ships at all. The release
-    # still requires deb to have SUCCEEDED -- a broken .deb must never be
-    # published -- and the steps below verify whatever artifacts are present
-    # and refuse to publish a partial or mismatched set.
+    needs: [deb, apk]
+    # `always()` so a failed apk does NOT skip the whole release. The .deb is
+    # the artifact the Linux in-app updater installs, and holding it hostage to
+    # an unrelated upstream Flet/Flutter break (apk is currently broken that
+    # way) means no release ships at all. The release still requires deb to
+    # have SUCCEEDED -- a broken .deb must never be published -- and the steps
+    # below verify whatever artifacts are present and refuse to publish a
+    # partial or mismatched set.
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.deb.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -396,34 +278,32 @@ jobs:
         run: |
           echo "deb:   ${{ needs.deb.result }}"
           echo "apk:   ${{ needs.apk.result }}"
-          echo "dmg:   ${{ needs.dmg.result }}"
-          if [ "${{ needs.apk.result }}" != "success" ] || [ "${{ needs.dmg.result }}" != "success" ]; then
-            echo "::warning::apk/dmg did not build; publishing the .deb only. The updater installs only .deb on Linux, so this release is still usable."
+          if [ "${{ needs.apk.result }}" != "success" ]; then
+            echo "::warning::apk did not build; publishing the .deb only. The updater installs only .deb on Linux, so this release is still usable."
           fi
-      # apk/macos are optional: download-artifact fails when the producing job
-      # did not upload anything, so these two are allowed to no-op.
+      # There is no macOS job, so no job can upload a `macos` artifact and the
+      # release job has no macOS handling: a macOS artifact cannot appear here.
+      # apk is optional -- download-artifact fails when the producing job did
+      # not upload anything, so this one is allowed to no-op.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with: { name: apk, path: apk }
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
-        with: { name: macos, path: macos }
       - name: Verify artifact names
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "release ${VERSION} contents:"
-          ls -la deb apk macos 2>/dev/null || true
+          ls -la deb apk 2>/dev/null || true
           # The .deb is REQUIRED -- it is what the Linux updater installs, and
           # a release without it would be useless to the primary audience.
           [ "$(ls deb/*.deb 2>/dev/null | wc -l)" -eq 1 ] || { echo "missing deb"; exit 1; }
           [ -f "deb/telegram-downloader_${VERSION}_amd64.deb" ] || { echo "unexpected deb filename"; ls -1 deb; exit 1; }
-          # apk/dmg are OPTIONAL. When their build job failed nothing is
-          # downloaded, and publishing the platforms that DID build is
-          # correct. When an artifact IS present it must still be exactly one
-          # correctly-named file -- a half-uploaded or misnamed artifact must
-          # never be published, and the "exactly one" check catches the case
-          # where a stale artifact got mixed in.
+          # apk is OPTIONAL. When its build job failed nothing is downloaded,
+          # and publishing the platforms that DID build is correct. When an
+          # artifact IS present it must still be exactly one correctly-named
+          # file -- a half-uploaded or misnamed artifact must never be
+          # published, and the "exactly one" check catches the case where a
+          # stale artifact got mixed in.
           if [ -d apk ]; then
             n="$(ls apk/*.apk 2>/dev/null | wc -l)"
             [ "$n" -eq 1 ] || { echo "apk dir present with $n artifacts (expected 0 or 1)"; ls -1 apk; exit 1; }
@@ -431,20 +311,12 @@ jobs:
           else
             echo "note: no apk artifact (build job failed); releasing .deb only"
           fi
-          if [ -d macos ]; then
-            n="$(ls macos/*.dmg 2>/dev/null | wc -l)"
-            [ "$n" -eq 1 ] || { echo "macos dir present with $n artifacts (expected 0 or 1)"; ls -1 macos; exit 1; }
-            [ -f "macos/telegram-downloader_${VERSION}.dmg" ] || { echo "unexpected dmg filename"; ls -1 macos; exit 1; }
-          else
-            echo "note: no dmg artifact (build job failed); releasing .deb only"
-          fi
 # Checksums are computed HERE, not in the jobs that built the artifacts.
       # This job has no checkout, no compiler and no source: it can only
       # download what the build jobs uploaded. A checksum produced by the same
       # process that produced the file proves nothing; this at least proves the
-      # published bytes are the bytes that were uploaded. (The .dmg's checksum
-      # used to have to be made on the macOS runner because stock macOS has no
-      # sha256sum; the release job is linux, so all three are computed here.)
+      # published bytes are the bytes that were uploaded. Both remaining
+      # platforms are Linux-built, so `sha256sum` covers the whole pipeline.
       - name: Compute and sign checksum manifests
         env:
           SIGN: ${{ inputs.sign }}
@@ -455,24 +327,23 @@ jobs:
           # exists. sha256sum on a missing glob would abort the step, and
           # publishing a SHA256SUMS-* with no installer beside it is worse
           # than publishing nothing for that platform.
-          for plat in deb apk dmg; do
+          for plat in deb apk; do
             case "$plat" in
-              deb) dir=deb;   ext=deb ;;
-              apk) dir=apk;   ext=apk ;;
-              dmg) dir=macos; ext=dmg ;;   # the macOS artifact dir is "macos"
+              deb) dir=deb; ext=deb ;;
+              apk) dir=apk; ext=apk ;;
             esac
             [ -d "$dir" ] || { echo "skipping $plat (no artifact dir)"; continue; }
-            # Match the platform's OWN extension only. Listing all three
-            # patterns makes sha256sum exit non-zero on the two that do not
-            # exist even though it writes the good line first, which under
-            # `set -e` aborts the step.
+            # Match the platform's OWN extension only. Listing both patterns
+            # makes sha256sum exit non-zero on the one that does not exist even
+            # though it writes the good line first, which under `set -e` aborts
+            # the step.
             shopt -s nullglob
             files=( "$dir"/*."$ext" )
             shopt -u nullglob
             [ "${#files[@]}" -eq 1 ] || { echo "skipping $plat (${#files[@]} .$ext files, expected 1)"; continue; }
             ( cd "$dir" && sha256sum "${files[@]##*/}" > "SHA256SUMS-$plat" )
           done
-          for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+          for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk; do
             [ -f "$f" ] || continue
             echo "--- $f"; cat "$f"
             ( cd "$(dirname "$f")" && sha256sum -c "$(basename "$f")" )
@@ -497,7 +368,7 @@ jobs:
             KEYID="$(openssl pkey -in "$KEY" -pubout -outform DER | tail -c 32 \
               | python3 -c 'import hashlib,sys; print(hashlib.sha256(b"tgdl-release-key:"+sys.stdin.buffer.read()).hexdigest()[:8])')"
             echo "release signing key id: $KEYID"
-            for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+            for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk; do
               [ -f "$f" ] || { echo "no manifest for $f (platform not built)"; continue; }
               dir="$(dirname "$f")"
               base="$(basename "$f")"
@@ -515,7 +386,7 @@ jobs:
             # manifest MUST have been signed -- otherwise this release has no
             # trust anchor at all and is not worth publishing.
             signed_count=0
-            for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk macos/SHA256SUMS-dmg; do
+            for f in deb/SHA256SUMS-deb apk/SHA256SUMS-apk; do
               [ -f "$f" ] || continue
               [ -f "$f.sig" ] || { echo "ERROR: $f has no signature"; exit 1; }
               ls -l "$f.sig"
@@ -535,8 +406,7 @@ jobs:
           {
             echo "assets<<EOF"
             for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.sig \
-                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.sig \
-                     macos/*.dmg macos/SHA256SUMS-dmg macos/SHA256SUMS-dmg.sig; do
+                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.sig; do
               [ -f "$f" ] && echo "$f"
             done
             echo "EOF"
@@ -555,8 +425,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             existing="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
             for f in deb/*.deb deb/SHA256SUMS-deb deb/SHA256SUMS-deb.sig \
-                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.sig \
-                     macos/*.dmg macos/SHA256SUMS-dmg macos/SHA256SUMS-dmg.sig; do
+                     apk/*.apk apk/SHA256SUMS-apk apk/SHA256SUMS-apk.sig; do
               [ -f "$f" ] || continue
               name="$(basename "$f")"
               if grep -Fxq "$name" <<<"$existing"; then

@@ -30,9 +30,17 @@
 
 ## Install
 
-Get the latest release for your platform from the
-[**Releases**](https://github.com/MDHasan0078/telegram-downloader/releases) page
-(`.deb` · `.apk` · macOS `.dmg`), or build from source:
+Each release ships a Linux `.deb`. Download the latest from the
+[**Releases**](https://github.com/MDHasan0078/telegram-downloader/releases)
+page and install it:
+
+```bash
+sudo apt install ./telegram-downloader_<version>_amd64.deb
+```
+
+A release may also carry an `.apk` when the Android build succeeds — download
+it on an Android device, allow installs from your file manager, and open it.
+There is no macOS installer; on macOS, run from source:
 
 ```bash
 git clone https://github.com/MDHasan0078/telegram-downloader
@@ -49,8 +57,9 @@ privately with `0600` permissions.
 
 | Platform | Notes |
 |---|---|
-| Linux | Script above, or `./scripts/build-deb.sh` → `dist/*.deb` |
-| macOS | `brew install python ffmpeg`, then the same pip steps |
+| Debian / Ubuntu | Install the release `.deb` as shown above, or `./scripts/build-deb.sh` → `dist/*.deb` |
+| Other Linux | `./scripts/install-deps.sh --gui --speed`, then `pip install -e ".[gui]"` |
+| macOS | From source only: `brew install python ffmpeg`, then the same pip steps |
 | Android / Termux | `pkg install python ffmpeg`, then `pip install -e ".[gui]"` |
 
 ## Usage
@@ -108,15 +117,16 @@ src/telegram_downloader/
   cli.py             tg-dl command
   gui.py             Flet GUI (Add / Queue / Settings / Dependencies)
 tests/               pytest, no network required
-scripts/             install-deps.sh, build-deb.sh, build-dmg.sh, build-apk.sh
+scripts/             install-deps.sh, build-deb.sh, build-apk.sh
 ```
 
 ## Releases
 
-Pushing a `v*` tag runs [CI](.github/workflows/build.yml): tests, then `.deb` /
-`.apk` / macOS builds attached to the
-[GitHub Release](https://github.com/MDHasan0078/telegram-downloader/releases)
-(which also powers the in-app updater):
+Pushing a `v*` tag runs [CI](.github/workflows/build.yml): tests, then the
+`.deb` build, plus an `.apk` build. The `.deb` is what every release ships and
+what the in-app updater installs; a failed `.apk` build does not block the
+release, so some releases carry the `.deb` alone. Artifacts are attached to the
+[GitHub Release](https://github.com/MDHasan0078/telegram-downloader/releases):
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
