@@ -9,10 +9,12 @@ These assertions are structural and cheap. They exist because the failure mode
 is invisible: the code parses, the module imports, and the tests are green.
 """
 import ast
+import base64
 import pathlib
 import re
 
 import telegram_downloader.updates as upd
+from telegram_downloader.gui import app_logo_src
 
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "telegram_downloader"
 TERMINAL = (ast.Raise, ast.Return)
@@ -65,22 +67,69 @@ def test_gui_nav_destinations_match_the_views_list():
     views_block = re.search(r"views = \[(.*?)\]\n", src, re.S)
     assert views_block, "could not find the views list in gui.py"
     entries = re.findall(r"(\w+)\(page\)", views_block.group(1))
-    assert entries == ["downloads_view", "queue_view", "settings_view",
-                       "deps_view"], f"unexpected views list: {entries}"
+    assert entries == ["downloads_view", "queue_view", "settings_view"], (
+        f"unexpected views list: {entries}")
 
-    # Each nav block must list the same number of destinations as views.
-    # Some entries are shared locals (queue_nav_dest) rather than inline
-    # Destination(...) calls, so count both forms.
-    for block in ("nav_destinations", "bar_destinations"):
-        m = re.search(rf"{block} = \[(.*?)\n        \]", src, re.S)
-        assert m, f"{block} not found"
-        body = m.group(1)
-        count = body.count("Destination(") + body.count("_nav_dest,") \
-            + body.count("_bar_dest,")
-        assert count == len(entries), (
-            f"{block} has {count} destinations but there are {len(entries)} "
-            "views; navigation indexes positionally and will show the wrong "
-            "page or raise IndexError")
+    # Navigation is a top row of chips built from primitives. flet 0.86.5's
+    # own tab controls cannot be driven the way _goto() needs, so the chip
+    # count is what keeps navigation aligned with `views`.
+    chips = re.findall(r"^\s+(?:queue_chip = )?_make_chip\((\d+), \"(\w+)\"",
+                       src, re.M)
+    # Compare by index, not source order: `queue_chip` is hoisted out of the Row
+    # so refresh_queue() can reach it, so it appears first in the source.
+    by_index = {int(i): label for i, label in chips}
+    assert sorted(by_index) == list(range(len(entries))), (
+        f"tab chips are at indices {sorted(by_index)} but there are "
+        f"{len(entries)} views; _make_chip indexes into `views`, so a gap or "
+        "a stale index shows the wrong page or raises IndexError")
+    assert [by_index[i] for i in range(len(entries))] == \
+        ["Add", "Queue", "Settings"], f"unexpected tab labels: {by_index}"
+
+    # The side rail and the bottom nav bar are gone; if either comes back the
+    # layout will double up with the top chips.
+    assert "NavigationRail(" not in src, "NavigationRail should be removed"
+    assert "NavigationBar(" not in src, "NavigationBar should be removed"
+    assert "page.navigation_bar" not in src, "page.navigation_bar should be unset"
+
+    # Dependencies is a Settings section now, not a top-level tab.
+    assert "deps_view(page)]" not in src, \
+        "Dependencies should not be a top-level tab"
+
+
+def test_tab_chips_are_keyed_by_index_not_construction_order():
+    """A click must highlight the chip that was clicked.
+
+    `queue_chip` is constructed BEFORE the Row, because refresh_queue() needs
+    a handle on it. So _tab_chips is [Queue, Add, Settings] while the screen
+    shows [Add, Queue, Settings]. Styling keyed on enumerate() order therefore
+    highlighted the wrong chip -- clicking "Add" lit up "Queue", which reads as
+    the navigation being broken.
+
+    The fix tags each chip with data=idx and matches on that. This test exists
+    so the ordering assumption can never silently come back, because a
+    position-based comparison looks correct right up until one chip is hoisted.
+    """
+    src = (SRC / "gui.py").read_text(encoding="utf-8")
+    assert "data=idx," in src, "chips must carry their own index (data=idx)"
+
+    selection = src[src.index("def _set_selected_index"):
+                    src.index("def on_nav")]
+    assert "chip.data == idx" in selection, \
+        "selection must match on chip.data, not list position"
+    assert "enumerate(_tab_chips)" not in selection, \
+        "selection must not depend on construction order"
+
+    # Construction order really does differ from visual order -- that is the
+    # whole reason position-based matching was wrong.
+    builds = re.findall(r'^\s+(?:queue_chip = )?_make_chip\((\d+), "(\w+)"',
+                        src, re.M)
+    order = [int(i) for i, _ in builds]
+    assert order != [0, 1, 2], (
+        "chips are built in visual order; this test's premise (and the "
+        "data=idx fix) assumed they are not")
+    by_index = {int(i): label for i, label in builds}
+    assert [by_index[i] for i in range(3)] == ["Add", "Queue", "Settings"], \
+        f"index->label mapping is wrong: {by_index}"
 
 
 def test_readme_documents_only_real_gui_pages():
@@ -91,10 +140,33 @@ def test_readme_documents_only_real_gui_pages():
     for name, label in (("deps_view", "Dependencies"),
                         ("queue_view", "Queue"),
                         ("settings_view", "Settings")):
+        # Dependencies is reachable as a Settings section rather than a tab.
+        if name == "deps_view":
+            assert "deps_section(page)" in src, \
+                "Dependencies must be reachable, as a Settings section"
+            continue
         assert name in views_block, f"{name} is not wired into the nav"
         if label in readme:
             assert name in views_block, (
                 f"README mentions {label!r} but {name} is not reachable")
+
+
+def test_download_location_is_reachable_from_the_window_chrome():
+    """The download folder must be changeable without entering Settings.
+
+    It is the field most likely to need changing, so it belongs in the always-
+    visible bottom bar rather than behind a navigation step. It must also go
+    through ensure_download_dir() before being stored, so the bottom bar can
+    never display a folder that download time would reject.
+    """
+    src = (SRC / "gui.py").read_text(encoding="utf-8")
+    assert "_pick_download_dir" in src, "no download-folder picker is wired up"
+    assert "dl_bar" in src, "no bottom download-location bar"
+    body = src[src.index("async def _pick_download_dir"):
+               src.index("dl_bar = ft.Container")]
+    assert "ensure_download_dir(st)" in body, (
+        "the picker must validate the folder before saving it")
+    assert "get_directory_path" in body, "must use a real folder picker"
 
 
 def test_gui_add_flow_is_reachable():
@@ -112,6 +184,42 @@ def test_gui_add_flow_is_reachable():
     used |= {n.attr for n in ast.walk(on_fetch[0]) if isinstance(n, ast.Attribute)}
     assert "fetch_preview" in used, "on_fetch no longer fetches previews"
     assert "render_previews" in used, "on_fetch no longer renders previews"
+
+
+def test_title_bar_uses_the_packaged_app_logo():
+    """The title bar must show the real shipped logo, not a stand-in.
+
+    The SVG is packaged as package-data so every install renders the
+    same mark. app_logo_src() reads it back as a self-contained data
+    URI; if that ever regresses to None the AppBar falls back to a
+    drawn arrow, which is why this pins the real asset directly.
+    """
+    src = app_logo_src()
+    assert src is not None, "packaged assets/icon.svg could not be read"
+    assert src.startswith("data:image/svg+xml;base64,"), (
+        "logo is not a self-contained SVG data URI")
+
+    svg = base64.b64decode(src.split(",", 1)[1]).decode("utf-8")
+    assert svg.lstrip().startswith("<svg"), "asset is not an SVG"
+    # The brand colours must survive: Telegram-blue tile, dark glyph.
+    assert "#2AABEE" in svg, "logo lost its blue tile"
+    assert "#0F1117" in svg, "logo lost its dark glyph"
+
+    # And the AppBar logo must be built from ft.Image (the real
+    # asset), with the primitives only as a fallback branch.
+    # app_logo is assigned in its own statement, so search the
+    # whole module for "app_logo = ft.Image(...)".
+    tree = ast.parse((SRC / "gui.py").read_text(encoding="utf-8"))
+    logo_images = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "app_logo"
+                for t in n.targets)
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Attribute)
+        and n.value.func.attr == "Image"
+    ]
+    assert logo_images, "app_logo is not built from the packaged ft.Image"
 
 
 def test_u4_guards_are_absent_not_merely_uncalled():
