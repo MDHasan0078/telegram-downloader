@@ -10,6 +10,7 @@ is invisible: the code parses, the module imports, and the tests are green.
 """
 import ast
 import pathlib
+import re
 
 import telegram_downloader.updates as upd
 
@@ -49,6 +50,51 @@ def test_no_unreachable_code_after_raise_or_return():
         for term_line, dead_line in _dead_after_terminal(path):
             offenders.append(f"{path.name}:{dead_line} follows terminal at :{term_line}")
     assert not offenders, "unreachable code:\n  " + "\n  ".join(offenders)
+
+
+def test_gui_nav_destinations_match_the_views_list():
+    """Navigation indexes into `views`, so the two lists must stay aligned.
+
+    deps_view was implemented and documented but never added to the nav, so
+    the page was unreachable while the README told users to install ffmpeg
+    through it. Both lists are positional: adding a view without a matching
+    destination shifts every later tab, and adding a destination without a
+    view makes navigation raise IndexError at runtime.
+    """
+    src = (SRC / "gui.py").read_text(encoding="utf-8")
+    views_block = re.search(r"views = \[(.*?)\]\n", src, re.S)
+    assert views_block, "could not find the views list in gui.py"
+    entries = re.findall(r"(\w+)\(page\)", views_block.group(1))
+    assert entries == ["downloads_view", "queue_view", "settings_view",
+                       "deps_view"], f"unexpected views list: {entries}"
+
+    # Each nav block must list the same number of destinations as views.
+    # Some entries are shared locals (queue_nav_dest) rather than inline
+    # Destination(...) calls, so count both forms.
+    for block in ("nav_destinations", "bar_destinations"):
+        m = re.search(rf"{block} = \[(.*?)\n        \]", src, re.S)
+        assert m, f"{block} not found"
+        body = m.group(1)
+        count = body.count("Destination(") + body.count("_nav_dest,") \
+            + body.count("_bar_dest,")
+        assert count == len(entries), (
+            f"{block} has {count} destinations but there are {len(entries)} "
+            "views; navigation indexes positionally and will show the wrong "
+            "page or raise IndexError")
+
+
+def test_readme_documents_only_real_gui_pages():
+    """The README must not advertise a page the user cannot reach."""
+    readme = (SRC.parent.parent / "README.md").read_text(encoding="utf-8")
+    src = (SRC / "gui.py").read_text(encoding="utf-8")
+    views_block = re.search(r"views = \[(.*?)\]\n", src, re.S).group(1)
+    for name, label in (("deps_view", "Dependencies"),
+                        ("queue_view", "Queue"),
+                        ("settings_view", "Settings")):
+        assert name in views_block, f"{name} is not wired into the nav"
+        if label in readme:
+            assert name in views_block, (
+                f"README mentions {label!r} but {name} is not reachable")
 
 
 def test_gui_add_flow_is_reachable():

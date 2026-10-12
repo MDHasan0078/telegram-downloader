@@ -2540,7 +2540,14 @@ def run_gui(port=None):
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
         )
 
-        views = [downloads_view(page), queue_view(page), settings_view(page)]
+        # deps_view was built and documented in the README but never added to
+        # the nav, so the page was unreachable while the README told users to
+        # install ffmpeg "via the Dependencies page". Restored rather than
+        # deleted: the page works and is the only place that reports whether
+        # ffmpeg/ffprobe are present. Order here must match the destinations
+        # below, since navigation indexes into this list.
+        views = [downloads_view(page), queue_view(page), settings_view(page),
+                 deps_view(page)]
 
         # -- Navigation destinations ---------------------------------------
         queue_nav_dest = ft.NavigationRailDestination(
@@ -2552,6 +2559,16 @@ def run_gui(port=None):
             icon=ft.Icons.QUEUE_OUTLINED,
             selected_icon=ft.Icons.QUEUE,
             label="Queue",
+        )
+        deps_nav_dest = ft.NavigationRailDestination(
+            icon=ft.Icons.BUILD_OUTLINED,
+            selected_icon=ft.Icons.BUILD,
+            label="Dependencies",
+        )
+        deps_bar_dest = ft.NavigationBarDestination(
+            icon=ft.Icons.BUILD_OUTLINED,
+            selected_icon=ft.Icons.BUILD,
+            label="Dependencies",
         )
         nav_destinations = [
             ft.NavigationRailDestination(
@@ -2565,6 +2582,7 @@ def run_gui(port=None):
                 selected_icon=ft.Icons.SETTINGS,
                 label="Settings",
             ),
+            deps_nav_dest,
         ]
         bar_destinations = [
             ft.NavigationBarDestination(
@@ -2578,6 +2596,7 @@ def run_gui(port=None):
                 selected_icon=ft.Icons.SETTINGS,
                 label="Settings",
             ),
+            deps_bar_dest,
         ]
 
         # -- NavigationRail (desktop / wide) --------------------------------
