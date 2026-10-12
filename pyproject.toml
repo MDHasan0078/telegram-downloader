@@ -53,6 +53,12 @@ Homepage = "https://github.com/MDHasan0078/telegram-downloader"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ship the app logo with the package so every install -- editable,
+# wheel, or the .deb's Python environment -- renders the same mark
+# in the GUI title bar rather than a fallback.
+[tool.setuptools.package-data]
+"telegram_downloader" = ["assets/*.svg"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"

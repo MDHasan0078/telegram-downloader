@@ -1,12 +1,16 @@
 """Flet desktop/mobile GUI — Material3 design matching simple-yt-downloader.
 
-Dark-first purple seed (#6750A4), header blocks (tinted icon + bold title
-+ subtitle), section cards (20px padding, icon + title + optional subtitle),
-info rows (primary icon + label/value), state-colored queue rows with
-% pills, progress bars, byte details and error containers.
+Achromatic body: structure comes from contrast and spacing, not hue. Colour is
+reserved for STATUS (blue = active transfer, amber = converting, emerald =
+done, red = failed) plus one Telegram-blue title bar. Header blocks (tinted
+icon + bold title + subtitle), section cards (20px padding, icon + title +
+optional subtitle), info rows, state-colored queue rows with % pills, progress
+bars, byte details and error containers.
 
-Pages: Add (URLs -> fetch titles -> confirm -> download), Queue,
-Settings (connection/defaults/about + update checker), Dependencies.
+Chrome mirrors simple-yt-downloader: navigation is a tab strip across the TOP
+(Add / Queue / Settings), the download folder is pinned to the BOTTOM and is
+editable from any tab, and theme is toggled from the title bar. Dependencies
+is a Settings section rather than its own page.
 
 Run:  tg-dl gui   (needs `pip install -e '.[gui]'`)
 """
@@ -34,13 +38,30 @@ from .telegram_utils import format_bytes, safe_filename, split_urls
 
 import re as _re_module
 
-SEED = "#6C4CE0"  # Telegram-ish indigo: calmer than #7C4DFF, less "web 2014"
+# Neutral grey seed. The UI is deliberately achromatic: structure comes from
+# contrast and spacing, not hue. Colour is reserved for STATUS below, so an
+# active transfer, a success and a failure are the only saturated things on
+# screen. This replaces an indigo seed that made every surface, icon, border
+# and selected tab purple.
+SEED = "#8A909E"  # neutral grey-400
+
+# -- Title bar ---------------------------------------------------------------
+# The one place colour is allowed outside the status palette. The body is
+# deliberately achromatic, so the app bar is the single blue band that says
+# "Telegram app" at a glance.
+#
+# Text is near-black, NOT white: #2AABEE with white text is 2.57:1, which fails
+# WCAG AA (4.5:1) for body text outright. Dark ink on the same blue is 7.33:1,
+# comfortably past AA. This is the same lightness lesson as the snackbars, where
+# the rule already is: pick ink or paper per background, never by habit.
+APPBAR_BG = "#2AABEE"  # Telegram brand blue
+APPBAR_FG = "#0F1117"  # dark ink — see contrast note above
 
 # -- Status colors (designed for dark-first palette, good contrast on dark bg) --
 STATUS_COLORS = {
     "queued":      "#94A3B8",   # slate-400 — idle/neutral
     "fetching":    "#38BDF8",   # sky-400 — looking up metadata
-    "downloading": "#6C4CE0",   # primary indigo — active transfer
+    "downloading": "#60A5FA",   # blue-400 — active transfer
     "converting":  "#F59E0B",   # amber-500 — processing
     "done":        "#34D399",   # emerald-400 — success
     "error":       "#F87171",   # red-400 — failure
@@ -52,8 +73,8 @@ SNACK_SUCCESS_BG = "#14532D"  # green-900
 SNACK_SUCCESS_FG = "#BBF7D0"  # green-200
 SNACK_ERROR_BG   = "#7F1D1D"  # red-900
 SNACK_ERROR_FG   = "#FECACA"  # red-200
-SNACK_INFO_BG    = "#2E1065"  # violet-950
-SNACK_INFO_FG    = "#DDD6FE"  # violet-200
+SNACK_INFO_BG    = "#22252E"  # neutral card, not violet-950
+SNACK_INFO_FG    = "#C9CDD8"  # neutral-200
 
 # -- Dark / light scaffold backgrounds --
 DARK_BG       = "#0F1117"   # near-black, slight blue cast
@@ -64,8 +85,8 @@ LIGHT_SURFACE = "#FFFFFF"
 # -- Error / hint box styling --
 ERROR_BOX_BG     = "#3D1515"
 ERROR_BOX_BORDER = "#FF5252"
-HINT_BOX_BG      = "#1E1E3A"
-HINT_BOX_BORDER  = "#7C4DFF"
+HINT_BOX_BG      = "#1B1E27"
+HINT_BOX_BORDER  = "#3A4050"
 
 _queue_widgets = {}  # item_id -> {card, progress_bar, pct_pill, detail_txt, ...}
 MODE_LABELS = {"1": "Original", "2": "Fast", "3": "Max"}
@@ -95,6 +116,28 @@ def _page_service(page, cls):
         cache[cls] = svc
         page.add(svc)
     return svc
+
+
+def app_logo_src() -> str | None:
+    """The packaged app logo as a data URI, or None if unavailable.
+
+    assets/icon.svg ships inside the package (see package-data in
+    pyproject.toml), so the title bar shows the same mark in every
+    install -- editable, wheel, or the .deb's Python environment.
+    A data URI is self-contained: it needs no assets_dir (which
+    ft.app() does not accept here) and renders in both the desktop
+    and web views. Returns None on any failure so the caller can
+    fall back to a drawn mark instead of a broken image box.
+    """
+    import base64
+
+    try:
+        from importlib.resources import files
+
+        svg = (files("telegram_downloader") / "assets" / "icon.svg").read_bytes()
+    except Exception:
+        return None
+    return "data:image/svg+xml;base64," + base64.b64encode(svg).decode("ascii")
 
 
 def run_gui(port=None, view=None):
@@ -289,9 +332,9 @@ def run_gui(port=None, view=None):
         fg = STATUS_COLORS.get(status, STATUS_COLORS["queued"])
         # Darker background tint for each status
         bg_map = {
-            "queued": "#2A2A3E",
-            "fetching": "#311B92",
-            "downloading": "#311B92",
+            "queued": "#232733",
+            "fetching": "#1E293B",
+            "downloading": "#1E293B",
             "converting": "#4E342E",
             "done": "#1B5E20",
             "error": "#3D1515",
@@ -367,9 +410,9 @@ def run_gui(port=None, view=None):
         # Use STATUS_COLORS for consistent, high-contrast colors
         fg = STATUS_COLORS.get(status, STATUS_COLORS["queued"])
         bg_map = {
-            "queued": "#2A2A3E",
-            "fetching": "#311B92",
-            "downloading": "#311B92",
+            "queued": "#232733",
+            "fetching": "#1E293B",
+            "downloading": "#1E293B",
             "converting": "#4E342E",
             "done": "#1B5E20",
             "error": "#3D1515",
@@ -1184,16 +1227,16 @@ def run_gui(port=None, view=None):
                 ]
                 if not ctrl.spans:
                     ctrl.value = "All clear."
-        # Update Queue navigation badge with active + error count.
+        # Update the Queue tab badge with active + error count.
         badge_count = n_active + n_failed
-        for key in ("rail_dest", "bar_dest"):
-            dest = queue_header_txt.get(key)
-            if dest is not None:
-                try:
-                    dest.badge = ft.Badge(str(badge_count),
-                                          bgcolor=ft.Colors.ERROR) if badge_count > 0 else None
-                except Exception:
-                    pass
+        dest = queue_header_txt.get("tab")
+        if dest is not None:
+            try:
+                dest.badge = (ft.Badge(str(badge_count),
+                                       bgcolor=ft.Colors.ERROR)
+                              if badge_count > 0 else None)
+            except Exception:
+                pass
         
         # Remove widgets for items no longer in queue
         current_ids = {it.id for it in items}
@@ -1458,8 +1501,6 @@ def run_gui(port=None, view=None):
                 settings_refs["mode_txt"].value = MODE_LABELS.get(st.output_mode, st.output_mode)
             if settings_refs.get("folder_txt") is not None:
                 settings_refs["folder_txt"].value = st.download_dir or str(default_download_dir())
-            if settings_refs.get("theme_sw") is not None:
-                settings_refs["theme_sw"].value = (st.theme or "dark") != "light"
         except Exception:
             pass
 
@@ -1517,8 +1558,7 @@ def run_gui(port=None, view=None):
         mode_txt = ft.Text(MODE_LABELS.get(st.output_mode, st.output_mode), size=14)
         folder_txt = ft.Text(st.download_dir or str(default_download_dir()), size=14,
                              max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
-        theme_sw = ft.Switch(value=(st.theme or "dark") != "light")
-        settings_refs.update(mode_txt=mode_txt, folder_txt=folder_txt, theme_sw=theme_sw)
+        settings_refs.update(mode_txt=mode_txt, folder_txt=folder_txt)
         settings_error = ft.Container(visible=False)
 
         async def pick_dir(e):
@@ -1540,7 +1580,12 @@ def run_gui(port=None, view=None):
             s = load_settings()
             s.api_id = api_id_f.value.strip() or None
             s.api_hash = api_hash_f.value.strip() or None
-            s.download_dir = dl_f.value.strip()
+            # download_dir is deliberately NOT written here. It is edited from
+            # the always-visible bottom bar, which validates through
+            # ensure_download_dir() and saves immediately. Assigning it from
+            # this screen's (now removed) text field meant that changing the
+            # folder at the bottom and then pressing Save in Settings silently
+            # reverted it to whatever the stale field still held.
             if s.api_id and not s.api_id.isdigit():
                 settings_error.content = error_box("API ID must be numeric.")
                 settings_error.visible = True
@@ -1643,14 +1688,6 @@ def run_gui(port=None, view=None):
                           "(offline?). Revoke at my.telegram.org if shared.", error=True)
                 else:
                     snack(page, "Logged out — server session revoked, files removed.")
-
-        def on_theme(e):
-            s = load_settings()
-            s.theme = "light" if not e.control.value else "dark"
-            save_settings(s)
-            apply_theme(page, s.theme)
-
-        theme_sw.on_change = on_theme
 
         check_updates_btn = ft.FilledTonalButton("Check for Updates", icon=ft.Icons.UPDATE)
 
@@ -1795,7 +1832,7 @@ def run_gui(port=None, view=None):
         # ── Redesigned layout ──────────────────────────────────────
         first = not st.api_id or not st.api_hash or not st.download_dir
 
-        # --- Section 1: API Credentials Card ---
+        # --- Section 1: API Credentials ---
         api_card_body = []
         if first:
             api_card_body.append(hint_box(
@@ -1804,151 +1841,42 @@ def run_gui(port=None, view=None):
             api_id_f,
             api_hash_f,
         ]
-        api_card = ft.Card(
-            elevation=2,
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Row([
-                            ft.Icon(ft.Icons.KEY, size=20, color=ft.Colors.PRIMARY),
-                            ft.Column([
-                                ft.Text("API Credentials", size=16,
-                                        weight=ft.FontWeight.BOLD),
-                                ft.Text("Asked once, stored privately (0600).",
-                                        size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                            ], spacing=2, expand=True),
-                        ], spacing=8),
-                        *api_card_body,
-                    ],
-                    spacing=12,
-                ),
-                padding=20,
-            ),
-        )
+        # Cards use the shared section() helper rather than hand-rolling the same
+        # icon+title+subtitle header four times. It also means they pick up the
+        # hairline border and explicit surface, which the elevation-only cards
+        # here were missing -- they read as one flat slab against the scaffold.
+        api_card = section("API Credentials", api_card_body,
+                           icon=ft.Icons.KEY,
+                           subtitle="Asked once, stored privately (0600).")
 
-        # --- Section 2: Download Folder Card ---
-        folder_card = ft.Card(
-            elevation=2,
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Row([
-                            ft.Icon(ft.Icons.FOLDER, size=20,
-                                    color=ft.Colors.PRIMARY),
-                            ft.Column([
-                                ft.Text("Download Folder", size=16,
-                                        weight=ft.FontWeight.BOLD),
-                                ft.Text("Where downloaded files are saved.",
-                                        size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                            ], spacing=2, expand=True),
-                        ], spacing=8),
-                        ft.Row([
-                            dl_f,
-                            ft.FilledTonalButton(
-                                "Browse",
-                                icon=ft.Icons.FOLDER_OPEN,
-                                on_click=pick_dir,
-                            ),
-                        ], spacing=8),
-                        folder_error,
-                        # Current path display
-                        ft.Container(
-                            ft.Row([
-                                ft.Icon(ft.Icons.FOLDER_OUTLINED, size=16,
-                                        color=ft.Colors.ON_SURFACE_VARIANT),
-                                ft.Text("Current: ", size=12,
-                                        color=ft.Colors.ON_SURFACE_VARIANT),
-                                folder_txt,
-                            ], spacing=6),
-                            padding=4,
-                            border_radius=6,
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-                        ),
-                    ],
-                    spacing=12,
-                ),
-                padding=20,
-            ),
-        )
+        # Download folder moved out of Settings: it lives in the bottom bar
+        # and is editable from any tab. Keeping a second copy here meant two
+        # controls for one value, and pressing Save below would overwrite the
+        # bottom bar's change with whatever this stale field held.
 
-        # --- Section 3: Output Mode Card ---
-        mode_card = ft.Card(
-            elevation=2,
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Row([
-                            ft.Icon(ft.Icons.TUNE, size=20,
-                                    color=ft.Colors.PRIMARY),
-                            ft.Column([
-                                ft.Text("Output Mode", size=16,
-                                        weight=ft.FontWeight.BOLD),
-                                ft.Text("Default mode for new downloads.",
-                                        size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                            ], spacing=2, expand=True),
-                        ], spacing=8),
-                        ft.Container(
-                            ft.Row([
-                                ft.Icon(ft.Icons.PLAY_CIRCLE, size=22,
-                                        color=ft.Colors.PRIMARY),
-                                ft.Text("Default: ", size=13,
-                                        color=ft.Colors.ON_SURFACE_VARIANT),
-                                mode_txt,
-                            ], spacing=8),
-                            padding=12,
-                            border_radius=8,
-                            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                        ),
-                        ft.Text("Change it on the Add tab.", size=12,
+        # --- Section 2: Output Mode ---
+        mode_card = section(
+            "Output Mode",
+            [
+                ft.Container(
+                    ft.Row([
+                        ft.Icon(ft.Icons.PLAY_CIRCLE, size=22,
                                 color=ft.Colors.ON_SURFACE_VARIANT),
-                    ],
-                    spacing=12,
+                        ft.Text("Default: ", size=13,
+                                color=ft.Colors.ON_SURFACE_VARIANT),
+                        mode_txt,
+                    ], spacing=8),
+                    padding=12,
+                    border_radius=8,
+                    border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
                 ),
-                padding=20,
-            ),
-        )
+                ft.Text("Change it on the Add tab.", size=12,
+                        color=ft.Colors.ON_SURFACE_VARIANT),
+            ],
+            icon=ft.Icons.TUNE,
+            subtitle="Default mode for new downloads.")
 
-        # --- Section 4: Appearance Card ---
-        appearance_card = ft.Card(
-            elevation=2,
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Row([
-                            ft.Icon(ft.Icons.PALETTE, size=20,
-                                    color=ft.Colors.PRIMARY),
-                            ft.Column([
-                                ft.Text("Appearance", size=16,
-                                        weight=ft.FontWeight.BOLD),
-                                ft.Text("Customize the look and feel.",
-                                        size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                            ], spacing=2, expand=True),
-                        ], spacing=8),
-                        ft.Container(
-                            ft.Row([
-                                ft.Icon(ft.Icons.DARK_MODE, size=22,
-                                        color=ft.Colors.PRIMARY),
-                                ft.Column([
-                                    ft.Text("Dark Theme", size=14,
-                                            weight=ft.FontWeight.W_500),
-                                    ft.Text("Use dark colours across the app.",
-                                            size=12,
-                                            color=ft.Colors.ON_SURFACE_VARIANT),
-                                ], spacing=2, expand=True),
-                                theme_sw,
-                            ], spacing=12),
-                            padding=12,
-                            border_radius=8,
-                            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                        ),
-                    ],
-                    spacing=12,
-                ),
-                padding=20,
-            ),
-        )
-
-        # --- Section 5: Action Buttons ---
+        # --- Section 3: Actions ---
         action_buttons = ft.Row([
             ft.FilledButton("Save Settings", icon=ft.Icons.SAVE,
                             on_click=on_save),
@@ -1958,34 +1886,19 @@ def run_gui(port=None, view=None):
                               on_click=on_logout),
         ], spacing=12, wrap=True)
 
-        # --- Section 6: About Card ---
-        about_card = ft.Card(
-            elevation=2,
-            content=ft.Container(
-                ft.Column(
-                    [
-                        ft.Row([
-                            ft.Icon(ft.Icons.INFO, size=20,
-                                    color=ft.Colors.PRIMARY),
-                            ft.Column([
-                                ft.Text("About", size=16,
-                                        weight=ft.FontWeight.BOLD),
-                                ft.Text("Version, engine and updater.",
-                                        size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                            ], spacing=2, expand=True),
-                        ], spacing=8),
-                        *_about_rows(),
-                        ft.Divider(),
-                        ft.Row([check_updates_btn],
-                               alignment=ft.MainAxisAlignment.START),
-                    ],
-                    spacing=12,
-                ),
-                padding=20,
-            ),
-        )
+        # --- Section 4: About ---
+        about_card = section(
+            "About",
+            [
+                *_about_rows(),
+                ft.Divider(),
+                ft.Row([check_updates_btn],
+                       alignment=ft.MainAxisAlignment.START),
+            ],
+            icon=ft.Icons.INFO,
+            subtitle="Version, engine and updater.")
 
-        # --- Section 7: Danger Zone (Reset) ---
+        # --- Section 5: Danger Zone ---
         danger_zone = ft.Container(
             ft.Column(
                 [
@@ -2023,19 +1936,18 @@ def run_gui(port=None, view=None):
 
         return ft.Column([
             h1(ft.Icons.SETTINGS, "Settings",
-               "Credentials, folders, appearance and updates."),
+               "Credentials, output mode, updates and environment."),
             api_card,
-            folder_card,
             settings_error,
             action_buttons,
             mode_card,
-            appearance_card,
+            deps_section(page),
             about_card,
             danger_zone,
         ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
 
     # ------------------------------------------------------------ deps page
-    def deps_view(page: ft.Page):
+    def deps_view(page: ft.Page, header: bool = True):
         import flet as ft
         col = ft.Column(spacing=20, scroll=ft.ScrollMode.AUTO, expand=True)
         sys_txt = ft.Text(f"{platform.system()} {platform.release()} • Python {platform.python_version()}",
@@ -2043,8 +1955,11 @@ def run_gui(port=None, view=None):
 
         def render(rows_data=None):
             col.controls.clear()
-            col.controls.append(h1(ft.Icons.BUILD, "Dependencies",
-                                   "Engine status for download + convert."))
+            # header=False when embedded as a section inside Settings, which
+            # already has its own page title and scroll container.
+            if header:
+                col.controls.append(h1(ft.Icons.BUILD, "Dependencies",
+                                       "Engine status for download + convert."))
             col.controls.append(sys_txt)
             if rows_data is None:
                 # First build happens before the view is shown, so the sync
@@ -2103,6 +2018,23 @@ def run_gui(port=None, view=None):
 
         render()
         return col
+
+    def deps_section(page: ft.Page):
+        """Dependencies embedded as a section inside Settings.
+
+        It used to be a top-level tab, which made Settings feel incomplete
+        ("where is the rest of it?") and pushed the real page count up to four.
+        Folding it in matches how the rest of the app is organised: Settings is
+        the place for configuration and environment, and dependency status is
+        environment. The inner view owns its own scroll, so nesting it inside
+        Settings' scroll container needs the wrapper below to stop it expanding
+        to full height and stealing the parent's scroll range.
+        """
+        inner = deps_view(page, header=False)
+        return ft.Container(
+            content=ft.Column([inner], spacing=16, tight=True),
+            padding=20,
+        )
 
     # ------------------------------------------------------------ dialogs
     # Flet 0.86 has no page.open/page.close: dialogs are shown via overlay.
@@ -2405,19 +2337,22 @@ def run_gui(port=None, view=None):
         dark_theme = ft.Theme(
             color_scheme_seed=SEED,
             scaffold_bgcolor=DARK_BG,
+            # Achromatic by design. Every role below is a grey, so hierarchy
+            # comes from lightness rather than hue. The two exceptions are
+            # `tertiary` (emerald, used for "done") and `error` (red), which
+            # must stay distinguishable because they carry meaning. `secondary`
+            # matters more than it looks: Flet paints the NavigationRail
+            # selected pill and some filled buttons with it, so a coloured
+            # secondary puts that hue on every tab the user selects.
             color_scheme=ft.ColorScheme(
-                primary=SEED,
-                on_primary="#FFFFFF",
-                primary_container="#2A1B54",
-                on_primary_container="#DDD6FE",
-                # Flet paints the NavigationRail selected pill and some
-                # filled buttons with `secondary`, so this must stay in the
-                # indigo family. Amber here turned the selected tab
-                # yellow-brown and clashed with the purple appbar.
-                secondary="#A78BFA",
-                on_secondary="#1A1033",
-                secondary_container="#332A6B",
-                on_secondary_container="#DDD6FE",
+                primary="#D7DBE4",
+                on_primary="#0F1117",
+                primary_container="#2A2F3A",
+                on_primary_container="#E6E8EF",
+                secondary="#9AA0AE",
+                on_secondary="#0F1117",
+                secondary_container="#252935",
+                on_secondary_container="#D7DBE4",
                 tertiary=STATUS_COLORS["done"],
                 on_tertiary="#0F1117",
                 tertiary_container="#0C3A2A",
@@ -2440,14 +2375,14 @@ def run_gui(port=None, view=None):
             color_scheme_seed=SEED,
             scaffold_bgcolor=LIGHT_BG,
             color_scheme=ft.ColorScheme(
-                primary=SEED,
+                primary="#3A3F4B",
                 on_primary="#FFFFFF",
-                primary_container="#E9E4FD",
-                on_primary_container="#2A1B54",
-                secondary="#5B4BC4",
+                primary_container="#E2E5EC",
+                on_primary_container="#1A1D26",
+                secondary="#6B7280",
                 on_secondary="#FFFFFF",
-                secondary_container="#E4E0FB",
-                on_secondary_container="#2A1B54",
+                secondary_container="#E8EAEF",
+                on_secondary_container="#1A1D26",
                 tertiary="#047857",
                 on_tertiary="#FFFFFF",
                 tertiary_container="#D1FAE5",
@@ -2492,6 +2427,11 @@ def run_gui(port=None, view=None):
             tooltip="Switch to light mode",
             on_click=_toggle_theme,
             icon_size=20,
+            # Sits on the blue app bar, so it takes the bar's ink rather than
+            # the scheme's ON_PRIMARY (which is near-black on the grey primary
+            # and would have been invisible here anyway). IconButton spells it
+            # icon_color, not color.
+            icon_color=APPBAR_FG,
         )
         # Sync initial icon with current theme
         _st0_icon = load_settings()
@@ -2500,23 +2440,49 @@ def run_gui(port=None, view=None):
             theme_btn.tooltip = "Switch to dark mode"
 
         # -- AppBar --------------------------------------------------------
+        # Explicit APPBAR_BG/FG rather than PRIMARY/ON_PRIMARY: PRIMARY is the
+        # achromatic scheme colour, so using it here is what made the title bar
+        # white.
+        #
+        # The mark is the APP's logo, not the Telegram paper plane.
+        # assets/icon.svg ships inside the package, so the title bar
+        # shows the real artwork in every install. It is loaded as a
+        # self-contained data URI (see app_logo_src) because ft.app()
+        # here accepts no assets_dir to serve the file from. If the
+        # asset cannot be read for any reason, fall back to a drawn
+        # square + download arrow that matches the SVG -- a broken
+        # image box is worse than a close copy.
+        logo_src = app_logo_src()
+        if logo_src is not None:
+            app_logo = ft.Image(
+                src=logo_src, width=24, height=24,
+                fit=ft.BoxFit.CONTAIN,
+            )
+        else:
+            app_logo = ft.Container(
+                width=24, height=24,
+                border_radius=0,      # square, not a lozenge
+                bgcolor=APPBAR_FG,
+                alignment=ft.Alignment.CENTER,
+                padding=0,
+                content=ft.Icon(ft.Icons.DOWNLOAD, color=APPBAR_BG, size=17),
+            )
         app_bar = ft.AppBar(
             leading=ft.Container(
-                ft.Icon(ft.Icons.TELEGRAM, color=ft.Colors.ON_PRIMARY, size=24),
-                bgcolor=ft.Colors.PRIMARY,
-                border_radius=8,
-                padding=6,
-                margin=ft.Margin(left=4),
+                app_logo, width=24, height=24,
+                alignment=ft.Alignment.CENTER,
+                padding=0, margin=ft.Margin(left=10),
             ),
             leading_width=44,
             title=ft.Text(
                 "Telegram Downloader",
-                size=18,
+                size=14,
                 weight=ft.FontWeight.W_600,
+                color=APPBAR_FG,
             ),
             center_title=False,
-            bgcolor=ft.Colors.PRIMARY,
-            color=ft.Colors.ON_PRIMARY,
+            bgcolor=APPBAR_BG,
+            color=APPBAR_FG,
             elevation=0,
             actions=[theme_btn],
         )
@@ -2540,148 +2506,126 @@ def run_gui(port=None, view=None):
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
         )
 
-        # deps_view was built and documented in the README but never added to
-        # the nav, so the page was unreachable while the README told users to
-        # install ffmpeg "via the Dependencies page". Restored rather than
-        # deleted: the page works and is the only place that reports whether
-        # ffmpeg/ffprobe are present. Order here must match the destinations
-        # below, since navigation indexes into this list.
-        views = [downloads_view(page), queue_view(page), settings_view(page),
-                 deps_view(page)]
+        # deps_view used to be a fourth tab. It now lives inside Settings as a
+        # section (deps_section), so the top tabs are Add / Queue / Settings.
+        views = [downloads_view(page), queue_view(page), settings_view(page)]
 
-        # -- Navigation destinations ---------------------------------------
-        queue_nav_dest = ft.NavigationRailDestination(
-            icon=ft.Icons.QUEUE_OUTLINED,
-            selected_icon=ft.Icons.QUEUE,
-            label="Queue",
-        )
-        queue_bar_dest = ft.NavigationBarDestination(
-            icon=ft.Icons.QUEUE_OUTLINED,
-            selected_icon=ft.Icons.QUEUE,
-            label="Queue",
-        )
-        deps_nav_dest = ft.NavigationRailDestination(
-            icon=ft.Icons.BUILD_OUTLINED,
-            selected_icon=ft.Icons.BUILD,
-            label="Dependencies",
-        )
-        deps_bar_dest = ft.NavigationBarDestination(
-            icon=ft.Icons.BUILD_OUTLINED,
-            selected_icon=ft.Icons.BUILD,
-            label="Dependencies",
-        )
-        nav_destinations = [
-            ft.NavigationRailDestination(
-                icon=ft.Icons.LINK_OUTLINED,
-                selected_icon=ft.Icons.LINK,
-                label="Add",
-            ),
-            queue_nav_dest,
-            ft.NavigationRailDestination(
-                icon=ft.Icons.SETTINGS_OUTLINED,
-                selected_icon=ft.Icons.SETTINGS,
-                label="Settings",
-            ),
-            deps_nav_dest,
-        ]
-        bar_destinations = [
-            ft.NavigationBarDestination(
-                icon=ft.Icons.LINK_OUTLINED,
-                selected_icon=ft.Icons.LINK,
-                label="Add",
-            ),
-            queue_bar_dest,
-            ft.NavigationBarDestination(
-                icon=ft.Icons.SETTINGS_OUTLINED,
-                selected_icon=ft.Icons.SETTINGS,
-                label="Settings",
-            ),
-            deps_bar_dest,
-        ]
+        # -- Top navigation ---------------------------------------------------
+        # Tabs sit across the TOP, not down the side, and Dependencies is gone
+        # from the tab list (it is a Settings section now). This matches
+        # simple-yt-downloader's StackSwitcher-in-the-headerbar layout and
+        # gives the content the full window width, which matters because the
+        # Queue rows are the widest thing in the app and were previously
+        # sharing it with a 72-200px rail.
+        # Built from primitives on purpose. flet 0.86.5's tab controls do not fit:
+        # ft.Tabs owns its own content and its tabs are positional children, so
+        # _goto() could not drive selected_index the way refresh_queue() and the
+        # first-run nudge need; ft.TabBar is header-only but has neither
+        # selected_index nor on_change. A Row of chips keeps the content ours,
+        # gives us the selected state to style, and does not depend on which
+        # of those three APIs the pinned Flet happens to ship.
+        _tab_chips: list = []
 
-        # -- NavigationRail (desktop / wide) --------------------------------
-        rail = ft.NavigationRail(
-            selected_index=0,
-            label_type=ft.NavigationRailLabelType.ALL,
-            destinations=nav_destinations,
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            indicator_color=ft.Colors.SECONDARY_CONTAINER,
-            indicator_shape=ft.RoundedRectangleBorder(radius=12),
-            min_width=72,
-            min_extended_width=200,
+        def _make_chip(idx: int, label: str, icon):
+            def _pick(e):
+                _goto(idx)
+            chip = ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(icon, size=18),
+                        ft.Text(label, size=14, weight=ft.FontWeight.W_600),
+                    ],
+                    spacing=8,
+                    tight=True,
+                ),
+                padding=ft.Padding(14, 9, 14, 9),
+                border_radius=10,
+                on_click=_pick,
+                # Identity is carried on the chip, not implied by its position in
+                # _tab_chips. queue_chip is built FIRST (refresh_queue needs a
+                # handle on it) but renders SECOND, so enumerate() order is
+                # [Queue, Add, Settings] while the screen shows
+                # [Add, Queue, Settings] -- clicking Add lit up Queue.
+                data=idx,
+            )
+            _tab_chips.append(chip)
+            return chip
+
+        queue_chip = _make_chip(1, "Queue", ft.Icons.QUEUE_OUTLINED)
+        tab_bar = ft.Row(
+            [
+                _make_chip(0, "Add", ft.Icons.LINK_OUTLINED),
+                queue_chip,
+                _make_chip(2, "Settings", ft.Icons.SETTINGS_OUTLINED),
+            ],
+            spacing=8,
+            tight=True,
         )
 
-        # -- NavigationBar (mobile / narrow) --------------------------------
-        bar = ft.NavigationBar(
-            selected_index=0,
-            destinations=bar_destinations,
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            indicator_color=ft.Colors.SECONDARY_CONTAINER,
-            elevation=0,
-        )
-
-        # Store nav destinations so refresh_queue can update the badge.
-        queue_header_txt["rail_dest"] = queue_nav_dest
-        queue_header_txt["bar_dest"] = queue_bar_dest
+        # Expose the Queue chip so refresh_queue can put the pending count on it.
+        queue_header_txt["tab"] = queue_chip
+        # Which view is on screen. Guards re-taps of the active chip.
+        _current_idx = -1
 
         def _set_selected_index(idx: int):
-            rail.selected_index = idx
-            bar.selected_index = idx
+            # Selected chip reads as a filled surface; the rest stay flat.
+            # Matched on chip.data, never enumerate order -- see _make_chip.
+            #
+            # animate_opacity is NOT used here on purpose: it is the cheapest
+            # property to composite, but it only fades the WHOLE chip, so an
+            # unselected chip would briefly ghost at partial opacity instead of
+            # going cleanly flat. bgcolor/border are painted every frame either
+            # way at this size (3 chips), so the cost is irrelevant and the
+            # direct property change is the honest one. Duration is short on
+            # purpose: this is a selection indicator, not a transition the user
+            # should wait out.
+            for chip in _tab_chips:
+                on = (chip.data == idx)
+                chip.bgcolor = (ft.Colors.SECONDARY_CONTAINER if on
+                                else ft.Colors.TRANSPARENT)
+                chip.content.controls[0].color = (ft.Colors.ON_SECONDARY_CONTAINER
+                                                  if on
+                                                  else ft.Colors.ON_SURFACE_VARIANT)
+                chip.content.controls[1].color = (ft.Colors.ON_SECONDARY_CONTAINER
+                                                  if on
+                                                  else ft.Colors.ON_SURFACE_VARIANT)
+                chip.border = (ft.Border.all(1, ft.Colors.OUTLINE) if on
+                               else ft.Border.all(1, ft.Colors.TRANSPARENT))
 
-        def on_nav(e):
-            idx = e.control.selected_index
+        def on_nav(idx: int):
+            # `nonlocal` is required, not decorative. Assigning _current_idx
+            # here makes Python treat it as a LOCAL of on_nav, so the read on
+            # the line above raised UnboundLocalError ("cannot access local
+            # variable '_current_idx' where it is not associated with a value")
+            # the first time any tab was clicked.
+            nonlocal _current_idx
+            # Re-tapping the active tab used to rebuild the view (Queue
+            # re-rendered every card) and flash. No-op instead.
+            if idx == _current_idx:
+                return
+            _current_idx = idx
             _set_selected_index(idx)
             body_content.content = views[idx]
-            page.update()
+            # ONE update per switch. refresh_queue()/refresh_settings_hint()
+            # each end with their own page.update(), so updating here too meant
+            # serialising the entire control tree twice per click.
             if idx == 1:
                 refresh_queue()
-            if idx == 2:
+            elif idx == 2:
                 refresh_settings_hint()
-
-        rail.on_change = on_nav
-        bar.on_change = on_nav
-
-        # -- Vertical divider (subtle) -------------------------------------
-        divider = ft.VerticalDivider(
-            width=1,
-            thickness=1,
-            color=ft.Colors.OUTLINE_VARIANT,
-        )
-
-        # -- Responsive layout: rail for wide, bar for narrow --------------
-        layout_row = ft.Row([rail, divider, body], expand=True, spacing=0)
-
-        _last_layout_mode = {"mode": None}
+            else:
+                page.update()
 
         def _apply_layout():
-            # Determine layout mode
+            # Padding only. The tabs span the full width at every size, so the
+            # old narrow/wide branch (rail vs bottom bar) is gone entirely --
+            # there is nothing left for it to decide.
             if page.width < 600:
-                mode = "narrow"
                 padding = 12
             elif page.width < 900:
-                mode = "medium"
                 padding = 20
             else:
-                mode = "wide"
                 padding = 28
-
-            # Only update if mode changed or first run
-            if _last_layout_mode["mode"] == mode:
-                if body.padding != padding:
-                    body.padding = padding
-                return
-
-            _last_layout_mode["mode"] = mode
-
-            if mode == "narrow":
-                # Narrow: hide rail, use bottom bar
-                layout_row.controls = [body]
-                page.navigation_bar = bar
-            else:
-                # Wide: use rail, no bottom bar
-                layout_row.controls = [rail, divider, body]
-                page.navigation_bar = None
-
             body.padding = padding
 
         def on_resize(e):
@@ -2691,15 +2635,74 @@ def run_gui(port=None, view=None):
         page.on_resize = on_resize
 
         def _goto(idx: int):
-            _set_selected_index(idx)
-            body_content.content = views[idx]
-            page.update()
-            if idx == 1:
-                refresh_queue()
-            if idx == 2:
-                refresh_settings_hint()
+            on_nav(idx)
 
         nav["goto"] = _goto
+
+        # -- Bottom bar: download location ---------------------------------
+        # Pinned to the bottom of the window so the folder can be changed in
+        # one click, the way simple-yt-downloader does it. It was previously
+        # only editable inside Settings, so changing where downloads land
+        # meant navigating to Settings first -- and the field most likely to
+        # need changing is the one furthest from view.
+        dl_path_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
+                              expand=True, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)
+
+        def _current_dl_label() -> str:
+            try:
+                p = ensure_download_dir(load_settings())
+                home = str(Path.home())
+                s = str(p)
+                return "~" + s[len(home):] if s.startswith(home + "/") else s
+            except Exception:
+                return "(not set)"
+
+        def _refresh_dl_label():
+            dl_path_txt.value = _current_dl_label()
+
+        async def _pick_download_dir(e):
+            picker = _page_service(page, ft.FilePicker)
+            try:
+                chosen = await picker.get_directory_path(
+                    dialog_title="Choose download folder")
+            except Exception as exc:
+                snack(page, f"Could not open folder picker: {exc}", error=True)
+                return
+            if not chosen:
+                return
+            # Validate before storing: config.ensure_download_dir() rejects
+            # paths inside the config dir, filesystem roots, and paths with
+            # shell metacharacters, and the sidebar label must never show a
+            # folder that would then fail at download time.
+            try:
+                st = load_settings()
+                st.download_dir = str(chosen)
+                ensure_download_dir(st)
+                save_settings(st)
+            except Exception as exc:
+                snack(page, f"Cannot use this folder: {exc}", error=True)
+                return
+            _refresh_dl_label()
+            snack(page, "Download folder updated.")
+            try:
+                page.update()
+            except Exception:
+                pass
+
+        dl_bar = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.FOLDER_OUTLINED, size=18,
+                            color=ft.Colors.ON_SURFACE_VARIANT),
+                    dl_path_txt,
+                    ft.TextButton("Change", on_click=_pick_download_dir),
+                ],
+                spacing=10,
+            ),
+            padding=ft.Padding(16, 8, 16, 8),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+        )
+        _refresh_dl_label()
 
         # -- Page shell: AppBar + layout -----------------------------------
         page.appbar = app_bar
@@ -2710,7 +2713,17 @@ def run_gui(port=None, view=None):
         _set_selected_index(start_idx)
         body_content.content = views[start_idx]
         _apply_layout()
-        page.add(layout_row)
+
+        # Tabs on top, download location at the bottom, content between.
+        page.add(ft.Column(
+            [
+                ft.Container(tab_bar, padding=ft.Padding(32, 12, 32, 4)),
+                body,
+                dl_bar,
+            ],
+            expand=True,
+            spacing=0,
+        ))
 
     import flet as ft
     # `view` exists so the GUI can be served over HTTP on a headless machine

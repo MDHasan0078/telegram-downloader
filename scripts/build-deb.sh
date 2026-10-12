@@ -553,7 +553,7 @@ Terminal=false
 Type=Application
 Categories=AudioVideo;Network;
 EOF
-[ -f assets/icon.svg ] && cp assets/icon.svg "$PKG/usr/share/icons/hicolor/scalable/apps/telegram-downloader.svg" || true
+[ -f src/telegram_downloader/assets/icon.svg ] && cp src/telegram_downloader/assets/icon.svg "$PKG/usr/share/icons/hicolor/scalable/apps/telegram-downloader.svg" || true
 chmod 0755 "$PKG/DEBIAN"
 DEB="dist/telegram-downloader_${VER}_amd64.deb"
 dpkg-deb --build "$PKG" "$DEB"

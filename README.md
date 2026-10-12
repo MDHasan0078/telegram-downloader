@@ -115,7 +115,7 @@ src/telegram_downloader/
   updates.py         GitHub-release update checker (stdlib only)
   queue_store.py     queue.json persistence (0600)
   cli.py             tg-dl command
-  gui.py             Flet GUI (Add / Queue / Settings / Dependencies)
+  gui.py             Flet GUI (top tabs: Add / Queue / Settings)
 tests/               pytest, no network required
 scripts/             install-deps.sh, build-deb.sh, build-apk.sh
 ```
@@ -144,7 +144,7 @@ Version source of truth: `__version__` in
 | Phone invalid | Use full international format, e.g. `+8801XXXXXXXXX` (typed blind — input is hidden, type carefully) |
 | Login every run | Finish one login; check `~/.config/telegram-downloader/session.session` exists; `tg-dl config logout` then log in again |
 | Transfer timeout / resume | Keep the partial file; rerun or Queue → Resume all / Start (backoff + reconnect built in) |
-| ffmpeg missing | Mode 1 works without it; install via the Dependencies page or `scripts/install-deps.sh` |
+| ffmpeg missing | Mode 1 works without it; check Settings > Dependencies for the exact install command, or run `scripts/install-deps.sh` |
 | Private channel / not found | The same account must be able to open the link in Telegram; check thread vs message id order |
 | GUI won't start | `pip install -e ".[gui]"`, then `tg-dl gui`; see `tg-dl deps` |
 
