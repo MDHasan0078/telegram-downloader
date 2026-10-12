@@ -1,6 +1,12 @@
 name: build
 on:
   push:
+    # Branch pushes run CI on ordinary commits. This was missing until
+    # ce7e0fd's audit, and it is the direct reason gui.py could ship a release
+    # whose entire Add flow was unreachable code: nothing ran until a tag was
+    # pushed, and by then it was too late. Branch pushes and tag pushes are
+    # mutually exclusive filters, so this adds no duplicate release runs.
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
