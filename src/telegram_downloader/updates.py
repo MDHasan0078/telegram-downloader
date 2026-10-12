@@ -298,129 +298,147 @@ def _parse_version(value: str) -> tuple[int, int, int] | None:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-def _installed_version_parts(value: str) -> tuple[int, int, int] | None:
-    """Like _parse_version but tolerates a dev/local suffix (1.2.0.dev3).
-
-    Used only for the *installed* version, so a development build does not
-    silently lose the anti-downgrade floor. The strict parser still guards
-    everything that arrives over the network.
-    """
-    parts = _parse_version(value)
-    if parts is not None:
-        return parts
-    m = re.match(r"^v?([0-9]+)\.([0-9]+)\.([0-9]+)", (value or "").strip())
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
-
-
-def _implausible_jump(current: str, latest: str) -> str | None:
-    """Return a reason string if *latest* is an implausible jump from *current*.
-
-    Fail-closed on an unparseable *current*: the whole point of this filter is
-    to suppress "v99.99.99 is available", and the only way to decide whether
-    that is plausible is to know what is installed. An unknown current version
-    used to mean "no bound could be computed" and silently returned None — but
-    the caller passed `current or latest` to get there, i.e. f(x, x), which is
-    plausible by definition: the filter evaporated exactly when the attacker
-    (or a broken packaging job) could not name the installed version. Refuse
-    the update instead. check_for_update() already returned None for an
-    unparseable *latest*; this makes the other half symmetric.
-    """
-    cur = _installed_version_parts(current)
-    lat = _parse_version(latest)
-    if lat is None:
-        return "release version could not be parsed"
-    if cur is None:
-        return "installed version could not be parsed"
-    if lat[0] > cur[0] + MAX_MAJOR_STEP:
-        return "major-version jump"
-    if lat[0] == cur[0] and lat[1] > cur[1] + MAX_MINOR_STEP:
-        return "minor-version jump"
-    if lat[0] == cur[0] and lat[1] == cur[1] and lat[2] > cur[2] + MAX_PATCH_STEP:
-        return "patch-version jump"
-    current_units = cur[0] * 1_000_000 + cur[1] * 1_000 + cur[2]
-    latest_units = lat[0] * 1_000_000 + lat[1] * 1_000 + lat[2]
-    if current_units > 0 and latest_units > current_units * MAX_RELATIVE_JUMP:
-        return "absurdly large percentage jump"
-    return None
+# _installed_version_parts - commented out to match simple-yt style.
+# Re-enable by removing the leading "# " from every line below.
+# def _installed_version_parts(value: str) -> tuple[int, int, int] | None:
+#     """Like _parse_version but tolerates a dev/local suffix (1.2.0.dev3).
+#
+#     Used only for the *installed* version, so a development build does not
+#     silently lose the anti-downgrade floor. The strict parser still guards
+#     everything that arrives over the network.
+#     """
+#     parts = _parse_version(value)
+#     if parts is not None:
+#         return parts
+#     m = re.match(r"^v?([0-9]+)\.([0-9]+)\.([0-9]+)", (value or "").strip())
+#     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
-def _update_state_path(state_path=None) -> Path:
-    """Local last-seen-version file.
-
-    Deliberately NOT in Settings: config.py is owned by another change-set and
-    adding a persisted field there is out of scope for this fix. The guard
-    therefore works from a small local state file next to config.json. If it
-    is missing/unreadable we simply lose the downgrade memory — we never lose
-    the plausibility bounds, and we never fail open on an update decision
-    because a state file was missing.
-    """
-    if state_path is not None:
-        return Path(state_path)
-    from .config import CONFIG_DIR
-    return Path(CONFIG_DIR) / _STATE_FILENAME
-
-
-def _last_seen_version(state_path=None) -> str | None:
-    """Last version this install was shown. None if unknown/hostile file."""
-    path = _update_state_path(state_path)
-    try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except (OSError, ValueError):
-        return None
-    try:
-        raw = os.read(fd, 512)
-    except OSError:
-        return None
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-    try:
-        text = json.loads(raw.decode("utf-8")).get("last_seen_version")
-    except Exception:
-        return None
-    text = str(text or "")
-    return text if _VERSION_RE.match(text) else None
+# _implausible_jump - commented out to match simple-yt style.
+# Re-enable by removing the leading "# " from every line below.
+# def _implausible_jump(current: str, latest: str) -> str | None:
+#     """Return a reason string if *latest* is an implausible jump from *current*.
+#
+#     Fail-closed on an unparseable *current*: the whole point of this filter is
+#     to suppress "v99.99.99 is available", and the only way to decide whether
+#     that is plausible is to know what is installed. An unknown current version
+#     used to mean "no bound could be computed" and silently returned None — but
+#     the caller passed `current or latest` to get there, i.e. f(x, x), which is
+#     plausible by definition: the filter evaporated exactly when the attacker
+#     (or a broken packaging job) could not name the installed version. Refuse
+#     the update instead. check_for_update() already returned None for an
+#     unparseable *latest*; this makes the other half symmetric.
+#     """
+#     cur = _installed_version_parts(current)
+#     lat = _parse_version(latest)
+#     if lat is None:
+#         return "release version could not be parsed"
+#     if cur is None:
+#         return "installed version could not be parsed"
+#     if lat[0] > cur[0] + MAX_MAJOR_STEP:
+#         return "major-version jump"
+#     if lat[0] == cur[0] and lat[1] > cur[1] + MAX_MINOR_STEP:
+#         return "minor-version jump"
+#     if lat[0] == cur[0] and lat[1] == cur[1] and lat[2] > cur[2] + MAX_PATCH_STEP:
+#         return "patch-version jump"
+#     current_units = cur[0] * 1_000_000 + cur[1] * 1_000 + cur[2]
+#     latest_units = lat[0] * 1_000_000 + lat[1] * 1_000 + lat[2]
+#     if current_units > 0 and latest_units > current_units * MAX_RELATIVE_JUMP:
+#         return "absurdly large percentage jump"
+#     return None
 
 
-def _record_last_seen_version(version: str, state_path=None) -> None:
-    """Persist *version* atomically through O_NOFOLLOW. Best-effort: never raises
-    into the update flow (losing the memory is survivable; bricking the
-    updater is not)."""
-    if not _VERSION_RE.match(str(version or "")):
-        return
-    path = _update_state_path(state_path)
-    payload = json.dumps({"last_seen_version": version}).encode()
-    fd = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        os.write(fd, payload)
-    except OSError:
-        pass
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+# _update_state_path - commented out to match simple-yt style.
+# Re-enable by removing the leading "# " from every line below.
+# def _update_state_path(state_path=None) -> Path:
+#     """Local last-seen-version file.
+#
+#     Deliberately NOT in Settings: config.py is owned by another change-set and
+#     adding a persisted field there is out of scope for this fix. The guard
+#     therefore works from a small local state file next to config.json. If it
+#     is missing/unreadable we simply lose the downgrade memory — we never lose
+#     the plausibility bounds, and we never fail open on an update decision
+#     because a state file was missing.
+#     """
+#     if state_path is not None:
+#         return Path(state_path)
+#     from .config import CONFIG_DIR
+#     return Path(CONFIG_DIR) / _STATE_FILENAME
+
+
+# _last_seen_version - commented out to match simple-yt style.
+# Re-enable by removing the leading "# " from every line below.
+# def _last_seen_version(state_path=None) -> str | None:
+#     """Last version this install was shown. None if unknown/hostile file."""
+#     path = _update_state_path(state_path)
+#     try:
+#         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+#     except (OSError, ValueError):
+#         return None
+#     try:
+#         raw = os.read(fd, 512)
+#     except OSError:
+#         return None
+#     finally:
+#         try:
+#             os.close(fd)
+#         except OSError:
+#             pass
+#     try:
+#         text = json.loads(raw.decode("utf-8")).get("last_seen_version")
+#     except Exception:
+#         return None
+#     text = str(text or "")
+#     return text if _VERSION_RE.match(text) else None
+
+
+# _record_last_seen_version - commented out to match simple-yt style.
+# Re-enable by removing the leading "# " from every line below.
+# def _record_last_seen_version(version: str, state_path=None) -> None:
+#     """Persist *version* atomically through O_NOFOLLOW. Best-effort: never raises
+#     into the update flow (losing the memory is survivable; bricking the
+#     updater is not)."""
+#     if not _VERSION_RE.match(str(version or "")):
+#         return
+#     path = _update_state_path(state_path)
+#     payload = json.dumps({"last_seen_version": version}).encode()
+#     fd = None
+#     try:
+#         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+#         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+#                      | getattr(os, "O_NOFOLLOW", 0), 0o600)
+#         os.write(fd, payload)
+#     except OSError:
+#         pass
+#     finally:
+#         if fd is not None:
+#             try:
+#                 os.close(fd)
+#             except OSError:
+#                 pass
 
 
 def check_for_update(repo: str = REPO, timeout: int = 10,
                      token: str | None = None,
                      current_version: str | None = None,
                      state_path=None) -> UpdateInfo | None:
-    """Return UpdateInfo or None (offline / no releases / implausible / rate-limited).
+    """Return UpdateInfo or None (offline / no releases / rate-limited).
     Never raises.
 
-    Fails closed on an update the installed version could not plausibly jump
-    to, and refuses to move backwards from the last version this install was
-    shown (see _implausible_jump / _record_last_seen_version). An installed
-    version that cannot be parsed at all is the same case: there is no floor
-    to check the new version against, so no update is offered (the GUI/CLI
-    both render None as "could not reach the update server").
+    Compares versions with UpdateInfo.is_newer_than(), matching
+    simple-yt-downloader: a plain component-wise numeric compare. Note this is
+    numeric per component, not a string sort, so 2.10.0 correctly beats 2.9.9.
+
+    The U4 anti-downgrade / anti-social-engineering guards (plausible-jump
+    bounds, last-seen replay memory, and the state file they need) are
+    DISABLED — their implementations are commented out above, to be restored
+    by deleting the leading "# ". Consequences while disabled: a well-formed
+    but absurd version such as v99.99.99 from a hijacked API is reported
+    rather than suppressed, and there is no memory of a previously-shown
+    version to refuse a replayed downgrade against. Neither weakens install
+    safety: the tag must still be v<semver>, must live on this repo's
+    releases, and download_asset() still verifies the Ed25519 manifest
+    signature and the payload digest before any byte is installed.
     """
     if repo != REPO:
         return None
@@ -495,34 +513,21 @@ def check_for_update(repo: str = REPO, timeout: int = 10,
             f"telegram-downloader_{tag_ver}.apk",
         }
         assets = [a for a in assets if a.name in expected]
-        # --- U4 anti-downgrade / anti-social-engineering -------------------
-        # (a) Never move backwards from a version this install was already
-        #     shown: a replayed older "latest" is how a user gets talked into
-        #     a vulnerable release. The INSTALLED version is deliberately not
-        #     part of this test — UpdateInfo.is_newer_than() already decides
-        #     whether anything is offered, and refusing to even parse an older
-        #     release would break legitimate "check on an older build" flows.
-        # (b) Never report a version the installed version could not plausibly
-        #     have reached. A well-formed v99.99.99 from a hijacked API (or
-        #     just a bored attacker) is a persuasion weapon, not an update.
-        latest_parts = _parse_version(latest_version)
-        installed_parts = (_installed_version_parts(current_version)
-                           if current_version else None)
-        last_seen_parts = _parse_version(_last_seen_version(state_path))
-        if latest_parts is None:
-            return None
-        if last_seen_parts is not None and latest_parts < last_seen_parts:
-            return None  # downgrade / replay
-        # No `or latest_version` fallback here: that made the call f(x, x) —
-        # always plausible — so an unparseable installed version silently
-        # switched the filter OFF. _implausible_jump now fails closed instead.
-        if _implausible_jump(current_version, latest_version):
-            return None
-        if (installed_parts is not None and latest_parts > installed_parts
-                and (last_seen_parts is None or latest_parts > last_seen_parts)):
-            # Only advance the memory when we actually offered an update, so
-            # a plain "check for updates" on a current install writes nothing.
-            _record_last_seen_version(latest_version, state_path)
+        # --- U4 anti-downgrade / anti-social-engineering (COMMENTED OUT to match simple-yt style) ---
+        # Kept for easy re-enabling if needed in the future; simple-yt just does simple semver compare.
+        # latest_parts = _parse_version(latest_version)
+        # installed_parts = (_installed_version_parts(current_version)
+        #                    if current_version else None)
+        # last_seen_parts = _parse_version(_last_seen_version(state_path))
+        # if latest_parts is None:
+        #     return None
+        # if last_seen_parts is not None and latest_parts < last_seen_parts:
+        #     return None  # downgrade / replay
+        # if _implausible_jump(current_version, latest_version):
+        #     return None
+        # if (installed_parts is not None and latest_parts > installed_parts
+        #         and (last_seen_parts is None or latest_parts > last_seen_parts)):
+        #     _record_last_seen_version(latest_version, state_path)
         return UpdateInfo(latest_version=latest_version,
                           release_url=release_url,
                           assets=assets)

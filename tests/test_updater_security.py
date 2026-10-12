@@ -754,11 +754,13 @@ def _release_payload(tag="v9.9.9"):
     }).encode()
 
 
-def test_u4_absurd_jump_rejected(monkeypatch, tmp_path):
-    monkeypatch.setattr(upd, "_urlopen_no_redirect",
-                        _fake_open(_release_payload("v99.99.99")))
-    assert upd.check_for_update(current_version="1.2.0",
-                                state_path=tmp_path / "state.json") is None
+# Commented out: the implausible-jump guard is disabled in updates.py, so a
+# well-formed v99.99.99 is no longer suppressed. Uncomment with the guard.
+# def test_u4_absurd_jump_rejected(monkeypatch, tmp_path):
+#     monkeypatch.setattr(upd, "_urlopen_no_redirect",
+#                         _fake_open(_release_payload("v99.99.99")))
+#     assert upd.check_for_update(current_version="1.2.0",
+#                                 state_path=tmp_path / "state.json") is None
 
 
 def test_u4_normal_next_minor_accepted(monkeypatch, tmp_path):
@@ -777,58 +779,63 @@ def test_u4_next_major_accepted(monkeypatch, tmp_path):
     assert info is not None and info.latest_version == "2.0.0"
 
 
-@pytest.mark.parametrize("current,latest,reason", [
-    ("1.2.0", "99.99.99", "major-version jump"),
-    ("1.2.0", "3.0.0", "major-version jump"),
-    ("1.2.0", "1.99.0", "minor-version jump"),
-    ("1.2.0", "1.2.900", "patch-version jump"),
-    ("1.2.0", "1.3.0", None),
-    ("1.2.0", "2.0.0", None),
-    ("1.2.0", "1.2.1", None),
-    ("0.9.0", "0.9.1", None),
-    ("9.9.8", "9.9.9", None),
-])
-def test_u4_implausible_jump_policy(current, latest, reason):
-    assert upd._implausible_jump(current, latest) == reason
+# The U4 anti-downgrade / anti-social-engineering guards are commented out in
+# updates.py to match simple-yt-downloader's simpler updater. Their tests are
+# commented out here for the same reason: uncomment BOTH together to restore
+# the full guard behaviour. Kept so re-enabling is a mechanical change.
+
+# @pytest.mark.parametrize("current,latest,reason", [
+#     ("1.2.0", "99.99.99", "major-version jump"),
+#     ("1.2.0", "3.0.0", "major-version jump"),
+#     ("1.2.0", "1.99.0", "minor-version jump"),
+#     ("1.2.0", "1.2.900", "patch-version jump"),
+#     ("1.2.0", "1.3.0", None),
+#     ("1.2.0", "2.0.0", None),
+#     ("1.2.0", "1.2.1", None),
+#     ("0.9.0", "0.9.1", None),
+#     ("9.9.8", "9.9.9", None),
+# ])
+# def test_u4_implausible_jump_policy(current, latest, reason):
+#     assert upd._implausible_jump(current, latest) == reason
 
 
-def test_u4_dev_version_still_anchors_the_floor(monkeypatch, tmp_path):
-    """A 1.2.0.dev3 build must not lose the anti-downgrade floor."""
-    monkeypatch.setattr(upd, "_urlopen_no_redirect",
-                        _fake_open(_release_payload("v99.99.99")))
-    assert upd.check_for_update(current_version="1.2.0.dev3",
-                                state_path=tmp_path / "state.json") is None
+# def test_u4_dev_version_still_anchors_the_floor(monkeypatch, tmp_path):
+#     """A 1.2.0.dev3 build must not lose the anti-downgrade floor."""
+#     monkeypatch.setattr(upd, "_urlopen_no_redirect",
+#                         _fake_open(_release_payload("v99.99.99")))
+#     assert upd.check_for_update(current_version="1.2.0.dev3",
+#                                 state_path=tmp_path / "state.json") is None
 
 
-def test_u4_backwards_from_last_seen_refused(monkeypatch, tmp_path):
-    state = tmp_path / "update-state.json"
-    upd._record_last_seen_version("1.5.0", state)
-    monkeypatch.setattr(upd, "_urlopen_no_redirect",
-                        _fake_open(_release_payload("v1.3.0")))
-    assert upd.check_for_update(current_version="1.5.0",
-                                state_path=state) is None
+# def test_u4_backwards_from_last_seen_refused(monkeypatch, tmp_path):
+#     state = tmp_path / "update-state.json"
+#     upd._record_last_seen_version("1.5.0", state)
+#     monkeypatch.setattr(upd, "_urlopen_no_redirect",
+#                         _fake_open(_release_payload("v1.3.0")))
+#     assert upd.check_for_update(current_version="1.5.0",
+#                                 state_path=state) is None
 
 
-def test_u4_forwards_records_last_seen(monkeypatch, tmp_path):
-    state = tmp_path / "update-state.json"
-    upd._record_last_seen_version("1.2.0", state)
-    monkeypatch.setattr(upd, "_urlopen_no_redirect",
-                        _fake_open(_release_payload("v1.3.0")))
-    assert upd.check_for_update(current_version="1.2.0",
-                                state_path=state) is not None
-    assert upd._last_seen_version(state) == "1.3.0"
+# def test_u4_forwards_records_last_seen(monkeypatch, tmp_path):
+#     state = tmp_path / "update-state.json"
+#     upd._record_last_seen_version("1.2.0", state)
+#     monkeypatch.setattr(upd, "_urlopen_no_redirect",
+#                         _fake_open(_release_payload("v1.3.0")))
+#     assert upd.check_for_update(current_version="1.2.0",
+#                                 state_path=state) is not None
+#     assert upd._last_seen_version(state) == "1.3.0"
 
 
-def test_u4_state_file_is_not_symlink_followed(tmp_path):
-    state = tmp_path / "update-state.json"
-    other = tmp_path / "victim"
-    other.write_text("{}")
-    state.symlink_to(other)
-    try:
-        upd._record_last_seen_version("9.9.9", state)
-    except OSError:
-        pass
-    assert other.read_text() == "{}"
+# def test_u4_state_file_is_not_symlink_followed(tmp_path):
+#     state = tmp_path / "update-state.json"
+#     other = tmp_path / "victim"
+#     other.write_text("{}")
+#     state.symlink_to(other)
+#     try:
+#         upd._record_last_seen_version("9.9.9", state)
+#     except OSError:
+#         pass
+#     assert other.read_text() == "{}"
 
 
 def test_u4_unicode_and_newline_tags_still_rejected(monkeypatch, tmp_path):
