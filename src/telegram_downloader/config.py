@@ -14,11 +14,13 @@ original single-file script), its api_id/api_hash are migrated.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import secrets
 import stat as _stat_mod
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -26,11 +28,25 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+try:  # POSIX only; absent on Windows.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
 APP_NAME = "telegram-downloader"
 OUTPUT_MODES = ("1", "2", "3")
 THEMES = ("system", "light", "dark")
 
 _UMASK_LOCK = threading.RLock()
+
+# Mapping last synced with each config file, keyed by path. `Settings` is a
+# plain dataclass with no provenance field, so this memo is how save_settings()
+# distinguishes "the caller changed this key" from "the caller inherited it and
+# never touched it" -- the latter must not overwrite a `tg-dl config set` made
+# by another process while the GUI was open. Keyed by path so a redirected
+# CONFIG_DIR (tests, a second config home) starts from a clean base.
+_SETTINGS_BASE: dict = {}
+_SETTINGS_LOCK = threading.RLock()
 
 # How many `.corrupt-*.bak` copies of an unparseable config.json to keep
 # before pruning the oldest. Same bound (and same reasoning) as
@@ -46,6 +62,155 @@ MAX_CORRUPT_BACKUPS = 5
 # handful of short scalars, so anything near this is corruption or an attack,
 # never real data.
 MAX_CONFIG_BYTES = 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# Cross-process serialisation for read-modify-write files
+#
+# `_atomic_write` makes one *write* indivisible, but config.json and
+# queue.json are read-modify-write units: read the whole file, change it,
+# write the whole file. Two processes doing that at once interleave and the
+# later writer silently discards whatever the earlier one had added --
+# measured on the queue: 4 processes x 250 add() left 272 of 1000 rows.
+#
+# The lock removes the interleaving. It deliberately does NOT decide what to
+# write, because knowing "this row is missing from the file" is not enough to
+# merge safely: a row missing from another process's view may be one that
+# process deliberately deleted. That disambiguation belongs to the caller
+# (QueueStore keeps a base snapshot; save_settings below remembers the mapping
+# it last synced with), so the primitive here stays dumb.
+# ---------------------------------------------------------------------------
+
+# Bounded acquisition. flock() is dropped by the kernel when the holder dies,
+# so a *crashed* writer cannot wedge us -- only a suspended one can (SIGSTOP,
+# a hung network mount, a VM snapshot), and that is what this bounds. The
+# timeout is sized for a slow disk, not a stale lock; a wedged app is strictly
+# worse than a lost row, so on expiry we proceed WITHOUT the lock rather than
+# block or raise.
+LOCK_TIMEOUT_S = 5.0
+_LOCK_POLL_S = 0.02
+# Re-entrancy is per thread AND per pid: flock() is owned by the open file
+# description, so a second os.open() in the same thread would block against
+# ourselves until the timeout. A pid change means we crossed fork() and the
+# inherited fd/claim means nothing in the child.
+_LOCK_TLS = threading.local()
+_LOCK_WARNED = False
+
+
+def _lock_file_path(path: Path) -> Path:
+    """Sidecar used for the flock.
+
+    A separate inode, because the data file itself is REPLACED by rename on
+    every save: flock()ing queue.json would only ever lock the unlinked
+    predecessor, so two writers would happily take "the lock" at once.
+    """
+    return path.with_name(path.name + ".lock")
+
+
+def _acquire_lock_fd(lock_path: Path, timeout: float) -> int:
+    """Take an exclusive flock, or return -1. Never blocks past `timeout`."""
+    try:
+        _mkdir_parents_nofollow(lock_path.parent, mode=0o700)
+    except (RuntimeError, OSError):
+        return -1
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        # O_CREAT|O_RDWR, deliberately NOT O_EXCL: the sidecar is meant to be
+        # shared and must survive between saves. O_NOFOLLOW makes a planted
+        # symlink fail with ELOOP instead of being followed. Opening a FIFO
+        # O_RDWR returns immediately (POSIX: no blocking), so a planted pipe
+        # here cannot wedge startup either.
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+    except OSError:
+        return -1
+    harden_private_file(lock_path)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as exc:
+            # EAGAIN/EWOULDBLOCK == somebody else holds it. Anything else is
+            # a real error (EBADF, EINVAL on a filesystem without locking) and
+            # retrying forever would be exactly the wedge we promised not to do.
+            if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                _release_lock_fd(fd)
+                return -1
+            if time.monotonic() >= deadline:
+                _release_lock_fd(fd)
+                return -1
+            time.sleep(_LOCK_POLL_S)
+
+
+def _release_lock_fd(fd: int) -> None:
+    """Unlock + close. Every exit path funnels here: no fd may leak."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _warn_lock_timeout(lock_path: Path) -> None:
+    global _LOCK_WARNED
+    if _LOCK_WARNED:
+        return
+    _LOCK_WARNED = True
+    print(f"Warning: could not lock {lock_path} within {LOCK_TIMEOUT_S:g}s; "
+          f"saving without it (a concurrent writer's changes may be "
+          f"overwritten).", file=sys.stderr)
+
+
+@contextmanager
+def interprocess_lock(path: Path, timeout: float = LOCK_TIMEOUT_S):
+    """Hold an exclusive flock on `<path>.lock` for the duration of the block.
+
+    Yields True when the lock is held, False when it could not be taken (no
+    fcntl, unlinkable sidecar, or the timeout expired). Callers must do the
+    right thing either way: on False they fall back to the pre-lock
+    last-writer-wins path, which can lose a concurrent update but can never
+    produce a corrupt file.
+
+    Re-entrant within a thread, so `load_settings` can hold the lock across
+    the legacy migration and then save through the same helper without
+    self-deadlocking.
+    """
+    lock_path = _lock_file_path(path)
+    tls = _LOCK_TLS
+    pid = os.getpid()
+    if getattr(tls, "pid", None) != pid:
+        tls.pid, tls.held = pid, {}
+    held = tls.held.get(lock_path)
+    if held is not None:
+        held["depth"] += 1
+        try:
+            yield True
+        finally:
+            held["depth"] -= 1
+        return
+    if fcntl is None:
+        yield False           # Windows: degrade to the old behaviour
+        return
+    fd = _acquire_lock_fd(lock_path, timeout)
+    if fd < 0:
+        _warn_lock_timeout(lock_path)
+        yield False
+        return
+    entry = {"fd": fd, "depth": 1}
+    tls.held[lock_path] = entry
+    try:
+        yield True
+    finally:
+        # Remove the entry before unlocking so a save() re-entered from a
+        # listener (or from an exception handler) can take the lock fresh
+        # instead of seeing a stale claim.
+        if tls.held.get(lock_path) is entry:
+            del tls.held[lock_path]
+        _release_lock_fd(fd)
+
 
 def _sanitize_display(s: str, limit: int = 500) -> str:
     """Strip control chars / ANSI escapes for safe terminal / UI display."""
@@ -591,54 +756,70 @@ def load_settings() -> Settings:
         if not isinstance(data, dict):
             data = {}
     else:
-        legacy = _read_legacy()
-        if legacy.get("api_id") or legacy.get("api_hash"):
-            data = {
-                "api_id": legacy.get("api_id"),
-                "api_hash": legacy.get("api_hash"),
-                "download_dir": "",
-                "output_mode": "1",
-            }
-            # Migrate immediately so there is a single source of truth.
-            save_settings(Settings(
-                api_id=data.get("api_id"),
-                api_hash=data.get("api_hash"),
-                download_dir="",
-                output_mode="1",
-            ))
-            # Shred the legacy world-readable KEY=VALUE file now that its
-            # secrets live in the 0600 JSON. Best-effort overwrite + unlink.
-            try:
-                if LEGACY_CONFIG.is_symlink():
-                    LEGACY_CONFIG.unlink()
-                elif LEGACY_CONFIG.is_file():
-                    try:
-                        # Shred via O_NOFOLLOW fd: a link planted between
-                        # the is_file() check and the open must not let us
-                        # zero-fill some OTHER file (clobber vector).
-                        nofollow = getattr(os, "O_NOFOLLOW", 0)
-                        fd = os.open(LEGACY_CONFIG, os.O_RDWR | nofollow)
+        # The legacy migration is the ONLY genuine read-modify-write in this
+        # module (read KEY=VALUE -> write config.json -> shred the source), so
+        # it is the only part that needs mutual exclusion: two first-runs at
+        # once would otherwise shred twice and interleave into one config.
+        # _SETTINGS_LOCK is taken BEFORE the file lock -- the same order
+        # save_settings() uses -- so the two can never deadlock each other.
+        with _SETTINGS_LOCK, interprocess_lock(CONFIG_JSON):
+            legacy = _read_legacy()
+            if legacy.get("api_id") or legacy.get("api_hash"):
+                data = {
+                    "api_id": legacy.get("api_id"),
+                    "api_hash": legacy.get("api_hash"),
+                    "download_dir": "",
+                    "output_mode": "1",
+                }
+                # Migrate immediately so there is a single source of truth.
+                _save_settings_locked(Settings(
+                    api_id=data.get("api_id"),
+                    api_hash=data.get("api_hash"),
+                    download_dir="",
+                    output_mode="1",
+                ))
+                # Shred the legacy world-readable KEY=VALUE file now that its
+                # secrets live in the 0600 JSON. Best-effort overwrite + unlink.
+                try:
+                    if LEGACY_CONFIG.is_symlink():
+                        LEGACY_CONFIG.unlink()
+                    elif LEGACY_CONFIG.is_file():
                         try:
-                            st = os.fstat(fd)
-                            os.ftruncate(fd, 0)
-                            size = min(st.st_size, 1 << 20)
-                            os.lseek(fd, 0, os.SEEK_SET)
-                            os.write(fd, b"\x00" * size)
-                            os.fsync(fd)
-                        finally:
+                            # Shred via O_NOFOLLOW fd: a link planted between
+                            # the is_file() check and the open must not let us
+                            # zero-fill some OTHER file (clobber vector).
+                            nofollow = getattr(os, "O_NOFOLLOW", 0)
+                            fd = os.open(LEGACY_CONFIG, os.O_RDWR | nofollow)
                             try:
-                                os.close(fd)
-                            except OSError:
-                                pass
-                    except OSError:
-                        pass
-                    LEGACY_CONFIG.unlink()
-            except OSError:
-                pass
-            try:
-                data = _read_json_nofollow(CONFIG_JSON) if CONFIG_JSON.exists() else data
-            except OSError:
-                pass
+                                st = os.fstat(fd)
+                                os.ftruncate(fd, 0)
+                                size = min(st.st_size, 1 << 20)
+                                os.lseek(fd, 0, os.SEEK_SET)
+                                os.write(fd, b"\x00" * size)
+                                os.fsync(fd)
+                            finally:
+                                try:
+                                    os.close(fd)
+                                except OSError:
+                                    pass
+                        except OSError:
+                            pass
+                        LEGACY_CONFIG.unlink()
+                except OSError:
+                    pass
+                try:
+                    data = _read_json_nofollow(CONFIG_JSON) if CONFIG_JSON.exists() else data
+                except OSError:
+                    pass
+
+    # Remember what the file literally said, BEFORE the normalisation and env
+    # overrides below are applied: those are not the user's on-disk state, and
+    # save_settings() uses this as the base that tells "the caller changed this
+    # key" from "the caller inherited it and never looked at it". Keyed by path
+    # so a redirected CONFIG_DIR (tests, a second config home) never inherits
+    # another file's history.
+    with _SETTINGS_LOCK:
+        _SETTINGS_BASE[str(CONFIG_JSON)] = dict(data) if isinstance(data, dict) else {}
 
     s = Settings(
         api_id=str(data.get("api_id")) if data.get("api_id") else None,
@@ -668,12 +849,68 @@ def load_settings() -> Settings:
     return s
 
 
+def _read_config_mapping():
+    """Current on-disk mapping, or None if it cannot be read as a dict.
+
+    None means "unknown" (unreadable, symlinked, corrupt) and makes the merge
+    below fall back to a plain overwrite -- exactly the pre-lock behaviour.
+    A missing file is NOT unknown: it is a known-empty queue, so a stale
+    in-memory copy must not repopulate it.
+    """
+    try:
+        if not CONFIG_JSON.exists():
+            return {}
+        data = _read_json_nofollow(CONFIG_JSON)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return None
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_settings(mine: dict, base, disk) -> dict:
+    """Three-way merge: my edits win, everyone else's survive.
+
+    `base` is the mapping as of the last time this process synced with the
+    file. A key whose value still equals `base` was NOT edited here, so
+    whatever the file says now is authoritative; a key that differs is a real
+    edit and wins -- including an edit to None/"", which is how the GUI
+    clears a credential.
+
+    Without a base there is no way to tell those two cases apart, and every
+    save becomes a whole-file overwrite. That was the bug: a long-lived GUI
+    whose `Settings` object predated a `tg-dl config set` silently reverted
+    it on the next save. QueueStore.save() needs the same distinction at row
+    granularity, which is why the base there is an id set rather than a dict.
+    """
+    if base is None or not isinstance(disk, dict):
+        return dict(mine)            # no history: old last-writer-wins
+    merged = {}
+    for key, value in mine.items():
+        if key in base and base[key] == value:
+            merged[key] = disk.get(key, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def save_settings(s: Settings) -> None:
     _ensure_dirs()
-    data = json.dumps(asdict(s), indent=2).encode("utf-8")
+    with _SETTINGS_LOCK, interprocess_lock(CONFIG_JSON):
+        _save_settings_locked(s)
+
+
+def _save_settings_locked(s: Settings) -> None:
+    """Write the settings. Caller holds _SETTINGS_LOCK and the file lock."""
+    mine = asdict(s)
+    key = str(CONFIG_JSON)
+    disk = _read_config_mapping()
+    merged = _merge_settings(mine, _SETTINGS_BASE.get(key), disk)
+    data = json.dumps(merged, indent=2).encode("utf-8")
     # Atomic + symlink-safe: random tmp suffix with O_NOFOLLOW|O_EXCL, so
     # secret bytes are never world-readable and never follow a planted link.
     _atomic_write(CONFIG_JSON, data)
+    # Only after the bytes are on disk: on failure the base must keep
+    # describing the file that is actually there, not the one we intended.
+    _SETTINGS_BASE[key] = dict(merged)
 
 
 def session_path_str() -> str:
