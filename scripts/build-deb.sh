@@ -132,13 +132,229 @@ if missing:
 print(f"==> {len(have_set)} vendored wheels cover every pin in {lock}")
 PY
 
+# --- msgpack must stay the pure-python wheel ------------------------------
+# requirements-runtime.lock pins msgpack-1.2.3-py3-none-any.whl, whose hash is
+# NOT the one PyPI publishes (PyPI has no such artifact; see the lock header).
+# That makes it the one wheel here whose provenance is enforced by this script
+# rather than by "the hash matches the upstream file", so the shape has to be
+# re-asserted on every build: exactly one msgpack wheel, pure-python, carrying
+# the fallback implementation and no compiled extension. Otherwise the next
+# `pip download msgpack` quietly puts five 460 KB binary wheels back into the
+# package and costs 2.3 MB, with nothing failing.
+python3 - "$WHEELDIR" <<'PY' || exit 1
+import hashlib, base64, pathlib, sys, zipfile
+
+wheel_dir = pathlib.Path(sys.argv[1])
+wheels = sorted(wheel_dir.glob("msgpack-*.whl"))
+
+
+def bail(msg):
+    sys.stderr.write(f"build-deb.sh: {msg}\n")
+    sys.exit(1)
+
+
+if len(wheels) != 1:
+    bail(f"{wheel_dir} must hold exactly one msgpack wheel, found {len(wheels)}:\n"
+         + "".join(f"    {w.name}\n" for w in wheels)
+         + "  Either msgpack came back as per-ABI binary wheels (2.3 MB), or it\n"
+         "  went missing. Re-vendor with scripts/vendor_msgpack_purepython.py;\n"
+         "  the rationale is in requirements-runtime.lock.")
+
+with zipfile.ZipFile(wheels[0]) as zf:
+    names = zf.namelist()
+    if any("_cmsgpack" in n for n in names):
+        bail(f"{wheels[0].name} contains a compiled extension. The pure-python "
+             "wheel exists because msgpack's fallback is byte-identical on the "
+             "wire and half the size; shipping the C extension restores 2.3 MB "
+             "of near-duplicate binaries for one installable copy.")
+    if "msgpack/fallback.py" not in names:
+        bail(f"{wheels[0].name} has no msgpack/fallback.py, so removing the C "
+             "extension would be a downgrade rather than a repack.")
+    tag = zf.read(next(n for n in names if n.endswith(".dist-info/WHEEL"))).decode()
+    if "Tag: py3-none-any" not in tag:
+        bail(f"{wheels[0].name} is not a universal wheel:\n{tag}")
+    # RECORD must describe the bytes that are actually here, or the wheel is a
+    # hand-edited artifact whose contents nothing downstream can account for.
+    record = zf.read(next(n for n in names if n.endswith(".dist-info/RECORD"))).decode()
+    listed = set()
+    for line in record.splitlines():
+        member, _, rest = line.partition(",")
+        digest, _, size = rest.partition(",")
+        listed.add(member)
+        if not digest:
+            continue
+        data = zf.read(member)
+        want = "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(data).digest()).rstrip(b"=").decode()
+        if digest != want or int(size) != len(data):
+            bail(f"{wheels[0].name}: RECORD disagrees with the bytes of {member}")
+    if listed != set(names):
+        bail(f"{wheels[0].name}: RECORD and contents disagree on "
+             f"{sorted(listed ^ set(names))}")
+
+print(f"==> msgpack is the pure-python wheel ({wheels[0].name})")
+PY
+
+# --- closure walk across the supported interpreter range ------------------
+# The pins above are read by eye, at 3.12, where every `python_version < "3.11"`
+# marker is False. That is how exceptiongroup went missing from wheels/ and the
+# .deb installed fine and then died on the user's first launch on 3.10. So: for
+# each interpreter this package claims to support, resolve the closure from the
+# vendored wheels' own Requires-Dist with THAT interpreter's markers, and fail
+# the build on anything unresolvable.
+#
+# `pip install --python-version` is not a substitute — it re-tags wheels but
+# still evaluates requirement markers against the interpreter RUNNING pip, so
+# it resolves a 3.10 install with exceptiongroup deleted (verified). The marker
+# evaluation below is the part that catches it.
+#
+# SUPPORTED_PYTHONS must stay in sync with the Depends: line below, and with
+# the range the lock header documents. Narrowing one without the others is
+# exactly the failure this gate exists to make impossible.
+SUPPORTED_PYTHONS="3.10 3.11 3.12 3.13 3.14"
+python3 - "$WHEELDIR" "$LOCK" "$SUPPORTED_PYTHONS" <<'PY' || exit 1
+import pathlib, re, sys, zipfile
+
+try:  # exact PEP 508 semantics when it is importable
+    from packaging.markers import Marker
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    def requirement(text):
+        """-> (canonical name, marker string or "")"""
+        req = Requirement(text)
+        return canonicalize_name(req.name), str(req.marker or "")
+
+    def marker_holds(marker, version):
+        return Marker(marker).evaluate({"python_version": version})
+
+except ImportError:  # and a conservative evaluator when it is not
+    def canonicalize_name(name):
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    def requirement(text):
+        head, _, marker = text.partition(";")
+        name = re.match(r"\s*([A-Za-z0-9._-]+)", head)
+        return (canonicalize_name(name.group(1)) if name else ""), marker.strip()
+
+    def marker_holds(marker, version):
+        # The only markers in this closure are python_version comparisons.
+        # Anything else (a platform condition, a boolean expression) is
+        # treated as TRUE: requiring a wheel we happen to ship is harmless,
+        # while treating it as FALSE can silently drop a pin, which is the
+        # exact bug this walk exists to catch. Failing closed is free.
+        m = re.fullmatch(
+            r"""\(?\s*python_version\s*(==|!=|<=|>=|<|>)\s*["']?([\d.]+)["']?\s*\)?""",
+            marker)
+        if not m:
+            return True
+        op, target = m.group(1), [int(p) for p in m.group(2).split(".")]
+        actual = [int(p) for p in version.split(".")]
+        actual += [0] * (len(target) - len(actual))
+        target += [0] * (len(actual) - len(target))
+        return {"==": actual == target, "!=": actual != target, "<": actual < target,
+                "<=": actual <= target, ">": actual > target,
+                ">=": actual >= target}[op]
+
+wheel_dir, lock = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+versions = sys.argv[3].split()
+
+# --- what we vendored, and which interpreters each wheel can serve ----------
+# A wheel filename is {name}-{version}(-{build})?-{python}-{abi}-{platform}...
+# so the tag section is everything after the version, and the platform may
+# carry several dot-separated alternatives.
+wheels, requires = {}, {}
+for path in sorted(wheel_dir.glob("*.whl")):
+    parts = path.name[: -len(".whl")].split("-")
+    name, version = canonicalize_name(parts[0]), parts[1]
+    tags = [t for t in parts[2:] if not t[:1].isdigit()]
+    wheels.setdefault(name, {})[version] = (path.name, tags)
+    with zipfile.ZipFile(path) as zf:
+        meta = next(n for n in zf.namelist()
+                    if n.endswith(".dist-info/METADATA") and n.count("/") == 1)
+        for line in zf.read(meta).decode("utf-8", "replace").splitlines():
+            if line.startswith("Requires-Dist:"):
+                requires.setdefault(name, []).append(line[15:].strip())
+
+
+def serves(tags, version):
+    """Would pip --only-binary be able to pick this wheel on `version`?
+
+    Two shapes are vendored: universal (py3-none-any, and six's py2.py3) and
+    one cpXY-cpXY-manylinux wheel per ABI. Anything else is treated as
+    unservable rather than guessed at, so an unrecognised wheel shape fails the
+    build loudly instead of being assumed compatible.
+    """
+    interpreter = "cp" + version.replace(".", "")
+    if len(tags) == 3 and tags[1] == "none" and tags[2] == "any":
+        return any(t.startswith("py3") for t in tags[0].split("."))
+    return len(tags) >= 3 and tags[0] == interpreter and tags[1] == interpreter
+
+
+# What the lock actually installs. A wheel in wheels/ that nothing pins is not
+# installed, so "has a wheel" is not enough on its own -- a transitively needed
+# package must be pinned too, or pip resolves it offline and fails.
+pinned = set()
+for raw in lock.read_text().splitlines():
+    pin = re.match(r"([A-Za-z0-9._-]+)==", raw.split("#", 1)[0].strip().rstrip("\\").strip())
+    if pin:
+        pinned.add(canonicalize_name(pin.group(1)))
+
+
+failures, sizes = [], []
+for version in versions:
+    # What the user actually installs on this interpreter: every requirement
+    # any vendored wheel declares, minus the optional extras this package does
+    # not ask for, minus the ones whose markers are false here.
+    wanted = set()
+    for entries in requires.values():
+        for text in entries:
+            if re.search(r"\bextra\s*==", text):
+                continue
+            dep, marker = requirement(text)
+            if dep and (not marker or marker_holds(marker, version)):
+                wanted.add(dep)
+    sizes.append(len(wanted))
+    for dep in sorted(wanted):
+        offered = wheels.get(dep, {})
+        if dep not in pinned:
+            failures.append(
+                f"python {version}: '{dep}' is required by a vendored wheel but "
+                f"is not pinned in {lock.name} — pip would try to resolve it "
+                f"from an index, and there is no index")
+        elif not offered:
+            failures.append(
+                f"python {version}: '{dep}' is pinned but has no wheel in "
+                f"{wheel_dir}/ — the user's first launch fails")
+        elif not [fn for fn, tags in offered.values() if serves(tags, version)]:
+            failures.append(
+                f"python {version}: '{dep}' is vendored as "
+                f"{sorted(fn for fn, _ in offered.values())}, none of which "
+                f"python {version} can install")
+
+if failures:
+    for line in failures:
+        sys.stderr.write(f"build-deb.sh: {line}\n")
+    sys.stderr.write(
+        "  The supported range is the union of what this package promises and\n"
+        "  what wheels/ can serve; a marker-conditional pin that goes missing\n"
+        "  fails the build here instead of at the user's first launch.\n")
+    sys.exit(1)
+print(f"==> closure walk over python {' '.join(versions)}: "
+      f"{'–'.join(str(s) for s in sizes)} requirements resolved per interpreter")
+PY
+
 PKG="dist/debroot"
 rm -rf "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/opt/telegram-downloader" "$PKG/usr/bin" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps"
 
-# python3 version bounds mirror the msgpack cp310..cp314 wheels vendored in
-# wheels/: the venv is built from the *system* interpreter, so the user's
-# python3 minor version decides which wheel --only-binary can pick.
+# These bounds are the range SUPPORTED_PYTHONS above walks, and they must be
+# edited together: the floor is what the closure needs (flet, msgpack and the
+# project all declare Requires-Python >=3.10), the ceiling is where we stop
+# testing. They are no longer tied to which msgpack ABI wheels happen to be
+# vendored — every runtime wheel in wheels/ is py3-none-any now — so raising
+# the ceiling is a support claim that the closure walk above has to survive, not
+# a packaging detail. See requirements-runtime.lock.
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: telegram-downloader
 Version: $VER
