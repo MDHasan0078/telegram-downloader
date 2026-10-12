@@ -554,6 +554,31 @@ def run_gui(port=None):
                     if not ok:
                         status_txt.value = "Login cancelled."
                         return
+                # This block used to sit AFTER the `raise` at the end of the
+                # RuntimeError handler below, which made it unreachable: the
+                # try body ended at the `return` above, and every path out of
+                # the handler either returned or re-raised. So "Fetch titles"
+                # silently did nothing and dl_btn (born disabled) was never
+                # enabled -- the GUI could not add a single download. It was
+                # introduced by 8f91996, a security fix that inserted the
+                # `raise` without moving the success path. It shipped in v1.3.0.
+                state["previews"] = []
+                for u in urls:
+                    status_txt.value = f"Fetching: {_sanitize_display(u)}"
+                    page.update()
+                    pv = await tg_client.fetch_preview(c, u)
+                    state["previews"].append({
+                        "url": _sanitize_display(u),
+                        "title": _sanitize_display(pv.title or u),
+                        "ext": pv.ext,
+                        "size": pv.size, "ok": pv.has_media and not pv.error,
+                        "error": _sanitize_display(pv.error), "selected": pv.has_media and not pv.error,
+                    })
+                render_previews()
+                n_ok = sum(1 for r in state["previews"] if r["ok"])
+                status_txt.value = (f"Found {n_ok}/{len(urls)} downloadable. "
+                                    f"Tick + edit titles, then Download selected.")
+                dl_btn.disabled = n_ok == 0
             except RuntimeError as exc:
                 # An identity-pin mismatch surfaces as a RuntimeError from
                 # get_client(). Offer the explicit reset here rather than
@@ -580,23 +605,6 @@ def run_gui(port=None):
                     page.update()
                     return
                 raise
-                state["previews"] = []
-                for u in urls:
-                    status_txt.value = f"Fetching: {_sanitize_display(u)}"
-                    page.update()
-                    pv = await tg_client.fetch_preview(c, u)
-                    state["previews"].append({
-                        "url": _sanitize_display(u),
-                        "title": _sanitize_display(pv.title or u),
-                        "ext": pv.ext,
-                        "size": pv.size, "ok": pv.has_media and not pv.error,
-                        "error": _sanitize_display(pv.error), "selected": pv.has_media and not pv.error,
-                    })
-                render_previews()
-                n_ok = sum(1 for r in state["previews"] if r["ok"])
-                status_txt.value = (f"Found {n_ok}/{len(urls)} downloadable. "
-                                    f"Tick + edit titles, then Download selected.")
-                dl_btn.disabled = n_ok == 0
             except Exception as exc:
                 status_txt.value = f"Fetch failed: {_sanitize_display(exc)}"
                 snack(page, _sanitize_display(str(exc)), error=True)
