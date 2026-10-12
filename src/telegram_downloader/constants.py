@@ -36,18 +36,16 @@ MAX_TITLE_BYTES = FS_NAME_MAX_BYTES - MAX_EXT_BYTES - MAX_STAGE_SUFFIX_BYTES \
     - MAX_ESCAPE_PREFIX_BYTES - MAX_SOURCE_TAG_BYTES   # == 218
 
 # -- partial integrity ----------------------------------------------------
-# NOT YET IMPLEMENTED — deliberately inert. Recorded here so the analysis
-# behind it is not lost, and so nobody "fixes" the resume path by referencing
-# a constant that does nothing.
+# IMPLEMENTED in downloader.py. This comment previously claimed the feature
+# was "NOT YET IMPLEMENTED — deliberately inert", which was false and
+# actively dangerous: a maintainer trusting it could have deleted _prefix_hash()
+# and _safe_resume_offset() as dead code.
 #
-# Gap: the resume sidecar proves PROVENANCE (which media a `.part` belongs
-# to) but nothing binds the partial's actual BYTES. A length-preserving
-# corruption — a bad sector, a filesystem that lost the tail, any writer that
-# preserves size — resumes and is reported as a successful download, because
-# the only content gate is `final_size != total`.
-#
-# Planned fix: record a digest of the first PREFIX_HASH_BYTES of the staged
-# partial in the sidecar, recompute on resume, and restart from 0 on mismatch.
+# How it works: downloader.py records a digest of the first PREFIX_HASH_BYTES
+# of the staged partial in the sidecar, recomputes it on resume, and restarts
+# from 0 on mismatch. That closes the length-preserving-corruption gap, where a
+# bad sector or a filesystem that lost the tail resumed and was reported as a
+# successful download because the only content gate was `final_size != total`.
 # Telegram exposes no whole-file checksum, so a prefix hash is a pragmatic
 # mitigation, not proof of integrity. Costs one extra read of ≤64 KiB.
 PREFIX_HASH_BYTES = 64 * 1024
@@ -60,21 +58,27 @@ PREFIX_HASH_BYTES = 64 * 1024
 SIDECAR_HASH_REQUIRED = False
 
 # -- retry-artifact sweep -------------------------------------------------
-# NOT YET IMPLEMENTED — deliberately inert. See the note above.
+# IMPLEMENTED in downloader.py: _sweep_artifacts_sync() (and
+# _sweep_retry_artifacts()) runs after every successful publish. Like the note
+# above, this block used to claim "NOT YET IMPLEMENTED — deliberately inert",
+# which was false; all four bounds below are enforced.
 #
-# Gap: publishing preserves the file it displaces as "<name>.replaced.<hex>",
-# so a retry loop leaves one copy per attempt forever. Measured: five retries
-# of a single 1000-byte item left 5000 bytes on disk. With MAX_FILE_BYTES at
-# 8 GiB, a few retries of a large file can consume multiples of its size, and
-# nothing anywhere sweeps them.
+# What it solves: publishing preserves the file it displaces as
+# "<name>.replaced.<hex>", so a retry loop leaves one copy per attempt forever.
+# Measured: five retries of a single 1000-byte item left 5000 bytes on disk.
+# With MAX_FILE_BYTES at 8 GiB, a few retries of a large file could consume
+# multiples of its size.
 #
-# Planned fix: a bounded sweep over the download directory. The age floor
-# matters more than the counts — the FIRST artifact of a burst is the user's
-# real pre-existing file and the rest are copies of our own output, so
-# deleting by recency alone would eat that original. The sweep must also skip
-# any `.part` a download is currently writing, never follow symlinks, and
-# swallow permission errors rather than failing a download.
+# Why the age floor matters more than the counts: the FIRST artifact of a burst
+# is the user's real pre-existing file and the rest are copies of our own
+# output, so deleting by recency alone would eat that original. The sweep also
+# skips any `.part` a download is currently writing, never follows symlinks,
+# and swallows permission errors rather than failing a download.
 SWEEP_MIN_AGE_SECONDS = 6 * 3600  # a preserved copy stays recoverable this long
-SWEEP_KEEP_PER_NAME = 2           # newest N artifacts kept per final name
+SWEEP_KEEP_PER_NAME = 2           # OLDEST N artifacts kept per final name (the
+                                  # newest surplus is dropped -- see
+                                  # _sweep_artifacts_sync() in downloader.py,
+                                  # which explicitly warns that "newest N kept"
+                                  # would eat the user's original)
 SWEEP_MAX_TOTAL = 200             # hard cap on retained artifacts per directory
 SWEEP_MIN_INTERVAL_SECONDS = 300  # at most one directory scan per this often
