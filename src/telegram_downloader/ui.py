@@ -22,16 +22,32 @@ from __future__ import annotations
 import flet as ft
 
 # -- Tokens ------------------------------------------------------------------
-# Navy cannot serve as the accent on a dark theme: #1B2A4A on #0B101C is about
-# 1.2:1. Navy is the surface family; blue is the accent. Each does the job it is
-# actually good at.
+# Navy cannot serve as the accent on a dark theme: #1B2A4A on a dark navy
+# surface is about 1.2:1. Navy is the surface family; blue is the accent. Each
+# does the job it is actually good at.
+#
+# THE CARD/SCAFFOLD RELATIONSHIP IS THE WHOLE DESIGN, and it was backwards.
+# Sampled from the running app rather than reasoned about:
+#
+#     reference   scaffold #353535   card #2D2D2D   -> card RECESSES 3%
+#     this app    scaffold #0B101C   card #121A2B   -> card LIFTED 40%
+#
+# A card brighter than its background is a panel. Stack several and the page
+# becomes boxes on a page, which is what this app looked like. The reference's
+# cards are a hairline around a fill one step from the window -- grouping, not
+# panels. So: scaffold is the LIGHTEST surface, cards sit below it, and the
+# hairline is the only thing that says "box" at all.
+#
+# Light mode inverts it the same way, which is what Material does too: on a
+# light window the card is the brighter surface, and on a dark window it is the
+# darker one. Cards always recede *into* the page, never lift off it.
 
 DARK = dict(
-    bg="#0B101C",            # scaffold, navy-black
-    surface="#121A2B",       # card / path bar
-    surface_alt="#182236",   # one step in: inputs, inset fills
-    border="#24324D",        # hairline, ~= alpha(fg, .16) over bg
-    border_strong="#334566",
+    bg="#131926",            # scaffold: the page itself, and every page is it
+    surface="#0C1017",       # card / path bar: DARKER, so it recedes
+    surface_alt="#1A2130",   # inputs -- raised again, the only lifted surface
+    border="#2A3448",        # outline
+    border_strong="#37455B",  # outline_variant: the hairline that draws cards
     text="#E4EAF5",
     muted="#93A2BD",
     faint="#64748F",
@@ -45,11 +61,11 @@ DARK = dict(
 )
 
 LIGHT = dict(
-    bg="#EEF0F6",
-    surface="#FFFFFF",
-    surface_alt="#F4F6FB",
-    border="#D3D8E6",
-    border_strong="#AEB6CC",
+    bg="#E7EAF1",            # scaffold: now the darkest, card is brighter
+    surface="#FFFFFF",       # card lifts off the page
+    surface_alt="#F1F4F9",   # inputs, one step back down toward the scaffold
+    border="#C9D0DE",
+    border_strong="#A6B0C4",
     text="#141A26",
     muted="#59637A",
     faint="#8A93A8",
@@ -76,9 +92,42 @@ GAP = 12          # card padding, from .download-row
 GUTTER = 16       # window margin, from settings_view.set_margin_start
 
 
+# The surface ramp, in Material's own order (lowest -> highest).
+#
+# Every one of these has to be set. They were not, and that is why the tokens
+# looked wrong on screen no matter what they said: ft.Colors.SURFACE_CONTAINER_
+# LOWEST paints the page body and OUTLINE_VARIANT draws every card border, but
+# neither was in the ColorScheme, so Flutter filled both in from the seed. The
+# body came out near-black and the borders came from the accent seed, so the
+# scaffold token below was overridden by the one control that covers the whole
+# window. Set the whole ramp and the tokens actually reach the pixels.
+# Every page container paints bg, not a ramp step. Material wants lowest to be
+# the deepest tone, which is right for an overlay hierarchy and wrong for a
+# page: the shell Container that fills the body used SURFACE_CONTAINER_LOWEST,
+# so a literal "deepest" value punched a near-black hole in the middle of the
+# window and the scaffold colour never showed. All three low steps collapse to
+# bg so the page is flat and cannot drift from the token that names it.
+SURFACE_RAMP_DARK = dict(
+    surface_container_lowest="#131926",   # == bg: the body Container
+    surface_container_low="#131926",
+    surface_container="#131926",
+    surface_container_high="#1A2130",     # inputs
+    surface_container_highest="#232B3C",  # hover / pressed
+)
+
+SURFACE_RAMP_LIGHT = dict(
+    surface_container_lowest="#E7EAF1",
+    surface_container_low="#E7EAF1",
+    surface_container="#E7EAF1",
+    surface_container_high="#F2F4F8",
+    surface_container_highest="#FAFBFD",
+)
+
+
 def theme(dark: bool = True) -> ft.Theme:
     """Build a Flet theme from a token set."""
     t = DARK if dark else LIGHT
+    ramp = SURFACE_RAMP_DARK if dark else SURFACE_RAMP_LIGHT
     th = ft.Theme(
         color_scheme_seed="#2AABEE",
         scaffold_bgcolor=t["bg"],
@@ -101,9 +150,15 @@ def theme(dark: bool = True) -> ft.Theme:
             on_error_container="#FFB4AB",
             surface=t["surface"],
             on_surface=t["text"],
-            surface_container_high=t["surface_alt"],
             on_surface_variant=t["muted"],
+            surface_dim=t["surface"],
+            surface_bright=ramp["surface_container_highest"],
             outline=t["border"],
+            # LIGHTER than the card fill, not darker: the reference's row border
+            # is #444444 on a #2D2D2D fill. A hairline lighter than the fill is
+            # what makes a card read as a card; a darker one just draws a seam.
+            outline_variant=t["border_strong"],
+            **ramp,
         ),
     )
     # Hidden at rest, shown while scrolling. The GTK reference does the same

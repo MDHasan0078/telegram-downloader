@@ -2999,7 +2999,10 @@ def run_gui(port=None, view=None):
                 spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            bgcolor=ft.Colors.SURFACE,
+            # No fill. The header is the same tone as the page, separated only
+            # by a hairline -- giving it a panel colour made the whole top of
+            # the window a band. See the scaffold/card note in ui.py.
+            bgcolor=None,
             bottom_border=True,
             pad_y=4,
         )
@@ -3162,7 +3165,7 @@ def run_gui(port=None, view=None):
                 ),
                 pad=8,
             ),
-            bgcolor=ft.Colors.SURFACE,
+            bgcolor=None,
             top_border=True,
             pad_y=8,
         )

@@ -511,3 +511,74 @@ def test_the_shared_header_handle_is_what_updates_the_count():
     assert "header" not in targets, (
         "refresh_queue() assigns to `header`, which is a queue_view local and "
         "is not visible from here -> NameError on every empty-queue refresh.")
+
+
+def _hex_rgb(value: str):
+    v = value.lstrip("#")
+    return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _luma(rgb):
+    """Relative luminance, sRGB coefficients."""
+    r, g, b = (c / 255 for c in rgb)
+    f = lambda c: c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+
+def test_cards_recede_into_the_page_in_both_modes():
+    """A card fill must be DARKER than the scaffold on dark, LIGHTER on light.
+
+    This is the single relationship that decides whether the app reads as a
+    page or as a stack of boxes, and it was backwards for several iterations.
+    Card luminance was ~40% ABOVE the scaffold, so every card was a bright
+    panel sitting on a dark page.
+
+    Measured off the reference app rather than reasoned about from its CSS:
+
+        simple-yt-downloader   scaffold #353535   card #2D2D2D   recedes
+        this app, before       scaffold #0B101C   card #121A2B   lifted
+
+    Cards always recede *into* the page; the hairline is the only thing that
+    says "box". Light mode flips both values and keeps the same relationship,
+    which is what Material does too.
+    """
+    from telegram_downloader import ui
+
+    for name, tokens in (("dark", ui.DARK), ("light", ui.LIGHT)):
+        scaffold = _luma(_hex_rgb(tokens["bg"]))
+        card = _luma(_hex_rgb(tokens["surface"]))
+        if name == "dark":
+            assert card < scaffold, (
+                f"dark card #{tokens['surface']} is not darker than the "
+                f"scaffold #{tokens['bg']} -- the cards read as bright panels "
+                "stacked on a dark page")
+        else:
+            assert card > scaffold, (
+                f"light card #{tokens['surface']} is not lighter than the "
+                f"scaffold #{tokens['bg']}")
+
+
+def test_every_surface_role_the_gui_uses_is_actually_set():
+    """No ft.Colors.SURFACE_* role may fall back to a generated default.
+
+    The shell Container that fills the page body paints with
+    SURFACE_CONTAINER_LOWEST, and every card border uses OUTLINE_VARIANT.
+    Neither was in the ColorScheme, so Flutter derived both from the seed:
+    the body came out near-black and the borders came from the accent seed.
+    That silently overrode scaffold_bgcolor -- the token that names the page
+    colour was never reaching the screen, which is why changing it appeared to
+    do nothing.
+
+    A generated default here is always wrong, whatever the seed.
+    """
+    from telegram_downloader import ui
+    import flet as ft
+
+    scheme = ui.theme(dark=True).color_scheme
+    for role in ("surface", "surface_container_lowest", "surface_container_low",
+                 "surface_container", "surface_container_high",
+                 "surface_container_highest", "surface_dim", "surface_bright",
+                 "outline", "outline_variant", "on_surface",
+                 "on_surface_variant"):
+        value = getattr(scheme, role, None)
+        assert value, f"ColorScheme.{role} is unset; it will be generated"
