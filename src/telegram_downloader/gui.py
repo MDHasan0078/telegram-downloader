@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import converter, deps as deps_mod
 from . import tg_client
+from . import ui
 from . import updates
 from .config import (_sanitize_display, Settings, clear_session,
                      default_download_dir, ensure_download_dir,
@@ -38,26 +39,31 @@ from .telegram_utils import format_bytes, safe_filename, split_urls
 
 import re as _re_module
 
-# Neutral grey seed. The UI is deliberately achromatic: structure comes from
-# contrast and spacing, not hue. Colour is reserved for STATUS below, so an
-# active transfer, a success and a failure are the only saturated things on
-# screen. This replaces an indigo seed that made every surface, icon, border
-# and selected tab purple.
-SEED = "#8A909E"  # neutral grey-400
-
-# -- Title bar ---------------------------------------------------------------
-# The one place colour is allowed outside the status palette. The body is
-# deliberately achromatic, so the app bar is the single blue band that says
-# "Telegram app" at a glance.
+# -- Layout metrics ----------------------------------------------------------
+# Every chrome bar AND the page body are capped at this width, so the nav, the
+# content and the footer all sit on ONE horizontal axis.
 #
-# Text is near-black, NOT white: #2AABEE with white text is 2.57:1, which fails
-# WCAG AA (4.5:1) for body text outright. Dark ink on the same blue is 7.33:1,
-# comfortably past AA. This is the same lightness lesson as the snackbars, where
-# the rule already is: pick ink or paper per background, never by habit.
-APPBAR_BG = "#2AABEE"  # Telegram brand blue
-APPBAR_FG = "#0F1117"  # dark ink — see contrast note above
+# This replaces the old arrangement, which had three different axes stacked on
+# top of each other: a full-bleed tab strip hugging the far left, an 860px body
+# column floating in the centre, and a full-bleed footer. Nothing lined up, so
+# at any width the app read as a web form rather than an application.
+#
+# There is deliberately NO max width now. A centred cap is what made the app
+# look like a phone layout stretched onto a desktop: on any normal monitor the
+# content occupied a fraction of the window with dead black either side. The
+# content now fills the window and the only constraint is the gutter, so the
+# window width is actually used.
+SHELL_PAD = 24
+
+# Readable measure for a single-line text input. Cards and lists span the full
+# window; the inputs inside them do not, because an API id is ~10 characters
+# and a field 1400px wide makes it harder to find, not easier.
+FIELD_MAX = 520
+
 
 # -- Status colors (designed for dark-first palette, good contrast on dark bg) --
+# The one place hue is allowed to carry meaning. These are the only saturated
+# things on screen while a download runs; everything structural is achromatic.
 STATUS_COLORS = {
     "queued":      "#94A3B8",   # slate-400 — idle/neutral
     "fetching":    "#38BDF8",   # sky-400 — looking up metadata
@@ -69,27 +75,39 @@ STATUS_COLORS = {
 }
 
 # -- Snackbar colors --
-SNACK_SUCCESS_BG = "#14532D"  # green-900
-SNACK_SUCCESS_FG = "#BBF7D0"  # green-200
-SNACK_ERROR_BG   = "#7F1D1D"  # red-900
-SNACK_ERROR_FG   = "#FECACA"  # red-200
-SNACK_INFO_BG    = "#22252E"  # neutral card, not violet-950
-SNACK_INFO_FG    = "#C9CDD8"  # neutral-200
-
-# -- Dark / light scaffold backgrounds --
-DARK_BG       = "#0F1117"   # near-black, slight blue cast
-DARK_SURFACE  = "#171A23"   # card surface
-LIGHT_BG      = "#F7F7FA"   # neutral grey, not a lavender tint
-LIGHT_SURFACE = "#FFFFFF"
+# Flat fills, no elevation. A snackbar is the transient voice of the app, so it
+# uses the same dark surfaces as everything else rather than introducing a
+# brighter band that flashes against the navy scaffold.
+SNACK_SUCCESS_BG = "#12301F"
+SNACK_SUCCESS_FG = "#7FD8A0"
+SNACK_ERROR_BG   = "#3A1216"
+SNACK_ERROR_FG   = "#FFB4AB"
+SNACK_INFO_BG    = "#182236"
+SNACK_INFO_FG    = "#93A2BD"
 
 # -- Error / hint box styling --
-ERROR_BOX_BG     = "#3D1515"
-ERROR_BOX_BORDER = "#FF5252"
-HINT_BOX_BG      = "#1B1E27"
-HINT_BOX_BORDER  = "#3A4050"
+ERROR_BOX_BG     = "#3A1216"
+ERROR_BOX_BORDER = "#E5484D"
+HINT_BOX_BG      = "#182236"
+HINT_BOX_BORDER  = "#24324D"
 
 _queue_widgets = {}  # item_id -> {card, progress_bar, pct_pill, detail_txt, ...}
 MODE_LABELS = {"1": "Original", "2": "Fast", "3": "Max"}
+# What each mode actually does, in words. The Settings card used to show only
+# "Default: Original", which told the user nothing -- they could not tell
+# whether Original was best, worst, or merely the default.
+#
+# Sourced from converter.ffmpeg_to_mp4: when the source is already H.264/AAC it
+# is remuxed with -c copy regardless of mode, so the mode only actually changes
+# anything when the source has to be re-encoded.
+MODE_BLURB = {
+    "1": "Keep the file exactly as Telegram sent it. No conversion, so "
+         "nothing is ever re-encoded.",
+    "2": "Convert to MP4 with a fast encoder preset. Smaller file, quicker to "
+         "process.",
+    "3": "Convert to MP4 with a better compression preset. Smallest file, "
+         "slower to process.",
+}
 
 
 def _page_service(page, cls):
@@ -261,70 +279,325 @@ def run_gui(port=None, view=None):
         except Exception:
             pass
 
+    def _copy_clipboard(page, text: str) -> None:
+        """Copy text to the clipboard, falling back to a selection the user can
+        copy by hand.
+
+        Flet's clipboard service is a no-op on some desktop builds and the web
+        view, and silently doing nothing after the user clicked "Copy" is worse
+        than useless. If the service is unavailable the text is selected in a
+        dialog so Ctrl+C still works.
+        """
+        async def _do():
+            try:
+                svc = _page_service(page, ft.Clipboard)
+                await svc.set_clipboard(text)
+                snack(page, "Command copied.")
+                return
+            except Exception:
+                pass
+            dlg = ft.AlertDialog(
+                title=ft.Text("Copy this command"),
+                content=ft.TextField(value=text, multiline=True,
+                                     read_only=True),
+                actions=[ft.TextButton("Close",
+                                       on_click=lambda e: _hide_dlg(page, dlg))])
+            _show_dlg(page, dlg)
+        page.run_task(_do)
+
     def install_cmd_for(dep) -> str:
         return dep.install_for_current_os()
 
     # ------------------------------------------------------------ design kit
+    # Type scale. Every heading used to be oversized (24px page titles, 26px
+    # icon tiles) with almost no steps between levels, so the whole app read as
+    # zoomed in. These are deliberate ratios: 19 / 14.5 / 13 / 11.5.
     def h1(icon, title: str, subtitle: str | None = None):
-        """Header block: tinted icon tile + bold title + optional subtitle."""
-        title_col = [ft.Text(title, size=24, weight=ft.FontWeight.BOLD)]
+        """Page header: small icon tile + title + optional subtitle."""
+        title_col = [ft.Text(title, size=16, weight=ft.FontWeight.W_700)]
         if subtitle:
-            title_col.append(ft.Text(subtitle, size=13,
+            title_col.append(ft.Text(subtitle, size=12,
                                      color=ft.Colors.ON_SURFACE_VARIANT))
         return ft.Row([
             ft.Container(
-                ft.Icon(icon, size=26, color=ft.Colors.ON_PRIMARY_CONTAINER),
-                bgcolor=ft.Colors.PRIMARY_CONTAINER,
-                border_radius=12, padding=8),
-            ft.Column(title_col, spacing=2, expand=True),
-        ], spacing=12)
+                ft.Icon(icon, size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+                border_radius=7, padding=6),
+            ft.Column(title_col, spacing=1, expand=True),
+        ], spacing=10)
 
-    def section(title: str, body: list, icon=None, subtitle: str | None = None):
-        """Section card: 20px padding, icon + bold title, optional subtitle."""
-        head = [ft.Text(title, size=16, weight=ft.FontWeight.BOLD)]
+    def mono(text, size=11, color=None, weight=None):
+        """Technical value in a monospace face: paths, versions, commands.
+
+        Stitch's system reserves mono for machine-level values (JetBrains
+        Mono) and sans for prose, so a command or a version reads differently
+        from a sentence at a glance instead of blending into the paragraph.
+        'monospace' is a generic family Flutter resolves on every desktop
+        target, so this needs no font download at runtime.
+        """
+        return ft.Text(text, size=size, font_family="monospace",
+                       color=color or ft.Colors.ON_SURFACE,
+                       weight=weight)
+
+    def badge(text, tone="neutral"):
+        """Small caps status chip, e.g. OK / MISSING / a mode name."""
+        fg, bg = {
+            "neutral": (ft.Colors.ON_SURFACE_VARIANT,
+                        ft.Colors.SURFACE_CONTAINER_HIGH),
+            "ok": (STATUS_COLORS["done"], "#0C2A20"),
+            "bad": (STATUS_COLORS["error"], "#3A1416"),
+            "accent": ("#89CEFF", "#0B2438"),
+        }.get(tone, (ft.Colors.ON_SURFACE_VARIANT,
+                     ft.Colors.SURFACE_CONTAINER_HIGH))
+        return ft.Container(
+            ft.Text(text, size=10.5, weight=ft.FontWeight.W_600,
+                    color=fg, font_family="monospace"),
+            bgcolor=bg, border_radius=4, padding=ft.Padding(7, 3, 7, 3))
+
+    def group(title: str, body: list, icon=None, subtitle: str | None = None,
+              action=None, *, card: bool = False):
+        """A titled group of controls. Bare by default -- no box, no divider.
+
+        This replaces the old `section()`, which wrapped every group in its own
+        bordered card. That is the single change responsible for this GUI
+        reading as broken: three or four full-width boxes stacked on a
+        background, each with its own title and its own hairline, so nothing on
+        the page had a clear primary area and every group looked equally
+        important. The reference states the rule in style.py:
+
+            One card language for video rows, playlist rows, loading rows, and
+            the download-path bar.
+
+        Everything that is not a list item sits directly on the scaffold under
+        a muted label. See simple-yt-downloader's `settings_view._section`,
+        which is three lines long and returns a bare Gtk.Label with the
+        `dim-label` class -- no frame anywhere.
+
+        `card=True` opts back in, and is used only for the About and
+        Dependencies groups, which hold tabular data and are the two places the
+        reference itself puts a border.
+        """
+        head = [ft.Text(title, size=11.5, weight=ft.FontWeight.W_600,
+                        color=ft.Colors.ON_SURFACE_VARIANT)]
         if subtitle:
-            head.append(ft.Text(subtitle, size=12,
+            head.append(ft.Text(subtitle, size=11,
                                 color=ft.Colors.ON_SURFACE_VARIANT))
+        # expand=True has to be on the thing that is a DIRECT child of the
+        # header Row, or the action does not get pushed to the right edge --
+        # a Row nested inside an expanding Row does not inherit the expansion.
+        title_col = ft.Column(head, spacing=1, expand=True)
         if icon is not None:
             title_row = ft.Row([
-                ft.Icon(icon, size=20, color=ft.Colors.PRIMARY),
-                ft.Column(head, spacing=2, expand=True),
-            ], spacing=8)
+                ft.Icon(icon, size=13, color=ft.Colors.ON_SURFACE_VARIANT),
+                title_col,
+            ], spacing=7, expand=True)
         else:
-            title_row = ft.Column(head, spacing=2)
-        return ft.Card(ft.Container(
-            ft.Column([title_row, *body], spacing=12),
-            padding=20,
-            # Explicit surface + hairline border. The bare Card inherited the
-            # default card colour, so sections read as one undifferentiated
-            # slab with no separation from the scaffold behind them.
+            title_row = title_col
+        title_row = ft.Row([title_row, action if action is not None
+                            else ft.Container()],
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        # STRETCH is what makes inputs fill the group. Without it Flet sizes a
+        # TextField to its content, so every form stopped at ~55% of the width
+        # and left a ragged dead strip on the right.
+        col = ft.Column([title_row, *body], spacing=12,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        if not card:
+            return col
+        return ft.Container(
+            col,
+            padding=12,
             bgcolor=ft.Colors.SURFACE,
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-            border_radius=12))
+            border_radius=12)
+
+    def labelled(label: str, control, hint: str | None = None,
+                 expand: bool = False):
+        """Label row (name left, hint right) above a control that fills.
+
+        Two changes from the old forms. The label moved out of the field border
+        so it can share a row with a right-aligned hint -- that is where the
+        generated design puts the reference ("telegram.org/apps -> App api_id")
+        and "128-bit hex string", which tells the user what to type before they
+        type it. And the control stretches, because Flet otherwise sizes a
+        TextField to its content and every field stopped at ~60% of the card.
+
+        `expand=True` stacks the hint UNDER the label and lets the control fill
+        its slot. That is what a field needs when it is half of a side-by-side
+        pair: the hint has nowhere useful to go beside a sibling, and the
+        caller has already divided the width, so capping again would leave the
+        row ragged.
+        """
+        if expand:
+            head = ft.Column(
+                [ft.Text(label, size=11, weight=ft.FontWeight.W_500,
+                         color=ft.Colors.ON_SURFACE_VARIANT)]
+                + ([ft.Text(hint, size=11, font_family="monospace",
+                            color=ft.Colors.ON_SURFACE_VARIANT)]
+                   if hint else []),
+                spacing=1)
+        else:
+            head = ft.Text(label, size=11, weight=ft.FontWeight.W_500,
+                           color=ft.Colors.ON_SURFACE_VARIANT)
+            if hint:
+                head = ft.Row([head, ft.Text(hint, size=11,
+                                             font_family="monospace",
+                                             color=ft.Colors.ON_SURFACE_VARIANT)])
+        # Cap the control. A text input stretched across a 1400px window is as
+        # unusable as one that stopped at 60% of its card -- just worse in the
+        # other direction, because the value is a short id and the eye has to
+        # travel to find it. expand=True opts out: see above.
+        if (not expand and hasattr(control, "width")
+                and getattr(control, "width", None) is None):
+            try:
+                control.width = FIELD_MAX
+            except Exception:
+                pass
+        # STRETCH when the caller has sized the slot, START otherwise. STRETCH
+        # forces children to fill the column and silently overrides the width
+        # set above -- which is why the cap had no effect until this split.
+        col = ft.Column([head, control], spacing=5,
+                        horizontal_alignment=(ft.CrossAxisAlignment.STRETCH
+                                              if expand
+                                              else ft.CrossAxisAlignment.START))
+        if expand:
+            # Without this the Column takes its intrinsic width and a Row of two
+            # of them hands each child only what it asked for, so the pair
+            # clusters at the left instead of splitting the row.
+            col.expand = True
+        return col
+
+    def _bar(inner, *, bgcolor=None, top_border=False, bottom_border=False,
+             pad_y=None):
+        """Full-bleed chrome bar whose content shares the body's gutter.
+
+        This is the alignment fix. Nav and footer used to be full-bleed while
+        the body was a separate centred column, so nothing lined up. Everything
+        goes through _bar and therefore shares one axis -- and nothing is
+        capped, so the bar's contents start where the body's do.
+        """
+        side = ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)
+        return ft.Container(
+            content=inner,
+            bgcolor=bgcolor,
+            padding=ft.Padding(SHELL_PAD, pad_y, SHELL_PAD, pad_y) if pad_y is not None else None,
+            border=(ft.Border.only(top=side) if top_border else
+                    ft.Border.only(bottom=side) if bottom_border else None),
+        )
+
+    def _grow(control, flex: int = 1):
+        """Mark a Row child as taking the leftover width.
+
+        A Row child that neither expands nor sets a width is laid out at zero
+        width in flet 0.86.5. The Row still reserves the child's correct HEIGHT,
+        so the failure is silent and looks like a layout bug rather than a
+        missing one: on the Add tab the URL field and all three of its buttons
+        collapsed to nothing width and the page showed a ~157px blank band
+        between the title and the output-mode toggle. Every other visible Row
+        here works only because one of its children already expands.
+
+        Verified with a minimal repro: expand=True on the child renders it,
+        the same child without expand renders nothing at the same height.
+        """
+        control.expand = flex
+        return control
+
+    def _ink_button_style():
+        """ButtonStyle that forces a neutral outline button to render in ink.
+
+        An ft.OutlinedButton inherits the scheme primary, so every "secondary"
+        action came out blue-on-blue and competed with the filled primary
+        button beside it. Three blue buttons on one row reads as three primary
+        actions. Forcing the foreground (and icon) to the muted ink colour puts
+        the hierarchy back: one accent action, everything else quiet.
+        """
+        return ft.ButtonStyle(
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            icon_color=ft.Colors.ON_SURFACE_VARIANT,
+            side=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT),
+        )
+
+    def pending_button(label: str, icon, handler, kind="tonal"):
+        """Button that disables itself and spins while its async handler runs.
+
+        Every long action in the app (verify credentials, login, check for
+        updates, recheck dependencies) previously gave the user NOTHING: the
+        button stayed live and the window looked frozen for several seconds, so
+        people clicked again. This is the fix -- immediate, unambiguous feedback.
+        """
+        cls = {"tonal": ft.FilledTonalButton, "filled": ft.FilledButton,
+               "outline": ft.OutlinedButton}.get(kind, ft.FilledTonalButton)
+        btn = cls(label, icon=icon, on_click=handler,
+                  **({"style": _ink_button_style()} if kind == "outline" else {}))
+
+        async def _run(e):
+            btn.disabled = True
+            btn.content = ft.Row(
+                [ft.ProgressRing(width=15, height=15, stroke_width=2),
+                 ft.Text("Working…", size=12)],
+                spacing=8, tight=True)
+            try:
+                btn.update()
+            except Exception:
+                pass
+            try:
+                await handler(e)
+            finally:
+                btn.disabled = False
+                btn.content = ft.Text(label, size=12)
+                try:
+                    btn.update()
+                except Exception:
+                    pass
+
+        btn.on_click = _run
+        return btn
 
     def info_row(icon, label: str, value: str, trailing=None):
-        row = [ft.Icon(icon, size=20, color=ft.Colors.PRIMARY),
-               ft.Column([ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                          ft.Text(value, size=14)], spacing=2, expand=True)]
+        row = [ft.Icon(icon, size=14, color=ft.Colors.PRIMARY),
+               ft.Column([ft.Text(label, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                          ft.Text(value, size=13)], spacing=2, expand=True)]
         if trailing is not None:
             row.append(trailing)
         return ft.Row(row, spacing=12)
 
     def info_row_ctrl(icon, label: str, value_ctrl, trailing=None):
         """Info row bound to a live control (for settings hints that refresh)."""
-        row = [ft.Icon(icon, size=20, color=ft.Colors.PRIMARY),
-               ft.Column([ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+        row = [ft.Icon(icon, size=14, color=ft.Colors.PRIMARY),
+               ft.Column([ft.Text(label, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
                           value_ctrl], spacing=2, expand=True)]
         if trailing is not None:
             row.append(trailing)
         return ft.Row(row, spacing=12)
 
+    def _row_note(icon, color, text: str, *, mono: bool = False):
+        """A one-line outcome note inside a queue card.
+
+        Deliberately not error_box(). That helper paints a full-width saturated
+        fill with a hard border, and putting one inside a card produced a red
+        panel nested in a card -- the failure message outshouted the filename
+        and the progress history it sits under. The state icon already carries
+        the colour; the text needs to be readable, not loud.
+        """
+        return ft.Row([
+            ft.Icon(icon, size=13, color=color),
+            ft.Text(text, size=11, expand=True,
+                    font_family="monospace" if mono else None,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
     def pct_pill(text: str):
-        return ft.Container(
-            ft.Text(text, size=11, weight=ft.FontWeight.BOLD,
-                    color=ft.Colors.WHITE),
-            bgcolor=ft.Colors.PRIMARY,
-            border_radius=10, padding=6)
+        """Percentage on an active row, as quiet monospace text.
+
+        This was a solid accent-filled pill in the top-right of every active
+        card -- the single loudest element on the row, restating what the
+        progress bar immediately below it already shows to better precision. The
+        reference moves the numbers off the bar and into the status line for
+        exactly this reason. Monospace keeps the digits from jittering as the
+        value ticks.
+        """
+        return ft.Text(text, size=11.5, font_family="monospace",
+                       color=ft.Colors.ON_SURFACE_VARIANT)
 
     def status_label(status: str):
         """Small theme-aware status chip for non-active queue rows."""
@@ -352,7 +625,7 @@ def run_gui(port=None, view=None):
         }
         icon, text = mapping.get(status, (ft.Icons.SCHEDULE, status))
         return ft.Container(
-            ft.Row([ft.Icon(icon, size=14, color=fg),
+            ft.Row([ft.Icon(icon, size=13, color=fg),
                     ft.Text(text, size=11, weight=ft.FontWeight.W_500, color=fg)],
                    spacing=4, tight=True),
             bgcolor=bg, border_radius=8, padding=6)
@@ -360,9 +633,9 @@ def run_gui(port=None, view=None):
     def error_box(message: str):
         _side = ft.BorderSide(1, ERROR_BOX_BORDER)
         return ft.Container(
-            ft.Row([ft.Icon(ft.Icons.ERROR, size=16,
+            ft.Row([ft.Icon(ft.Icons.ERROR, size=13,
                             color=SNACK_ERROR_FG),
-                    ft.Text(message, size=12, expand=True, selectable=True,
+                    ft.Text(message, size=11, expand=True, selectable=True,
                             color=SNACK_ERROR_FG)],
                    spacing=8),
             bgcolor=ERROR_BOX_BG,
@@ -374,9 +647,9 @@ def run_gui(port=None, view=None):
         _side = ft.BorderSide(1, HINT_BOX_BORDER)
         return ft.Container(
             ft.Row([
-                ft.Icon(ft.Icons.INFO_OUTLINE, size=16,
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=13,
                         color=HINT_BOX_BORDER),
-                ft.Text(message, size=12, expand=True,
+                ft.Text(message, size=11, expand=True,
                         color=ft.Colors.ON_SURFACE_VARIANT),
             ], spacing=8),
             bgcolor=HINT_BOX_BG,
@@ -386,25 +659,34 @@ def run_gui(port=None, view=None):
     def empty_state(icon, title: str, subtitle: str,
                     action_label: str | None = None,
                     action_icon=None, on_action=None):
+        # This was a 56px icon with a 22px title and 48px of padding, so an
+        # empty list occupied ~500px of vertical space and read as a landing
+        # page rather than "nothing here yet". A placeholder should be quieter
+        # than the content it stands in for, not louder.
         controls = [
             ft.Container(
-                ft.Icon(icon, size=56, color=ft.Colors.PRIMARY),
-                bgcolor=ft.Colors.PRIMARY_CONTAINER,
-                border_radius=28, padding=20),
-            ft.Text(title, size=22, weight=ft.FontWeight.BOLD),
-            ft.Text(subtitle, size=14, color=ft.Colors.ON_SURFACE_VARIANT,
+                ft.Icon(icon, size=14, color=ft.Colors.ON_SURFACE_VARIANT),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+                border_radius=8, padding=8),
+            ft.Text(title, size=12, weight=ft.FontWeight.W_600),
+            ft.Text(subtitle, size=11, color=ft.Colors.ON_SURFACE_VARIANT,
                     text_align=ft.TextAlign.CENTER),
         ]
         if action_label and on_action is not None:
             controls.append(ft.Container(
-                ft.FilledButton(action_label, icon=action_icon,
-                                on_click=on_action),
-                margin=8))
+                ft.TextButton(action_label, icon=action_icon,
+                              on_click=on_action),
+                margin=0))
+        # expand=True, because this Container is a child of a ListView. A list
+        # child that neither expands nor sets a width is laid out at ZERO width
+        # and paints nothing -- the empty queue showed a bare toolbar over an
+        # empty screen even though this state was being appended the whole time.
+        # It was invisible for the same reason the Add tab's input row was.
         return ft.Container(
-            ft.Column(controls, spacing=12,
+            ft.Column(controls, spacing=8,
                       alignment=ft.MainAxisAlignment.CENTER,
                       horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            padding=48)
+            padding=20, expand=True)
 
     def state_icon(status: str):
         # Use STATUS_COLORS for consistent, high-contrast colors
@@ -430,12 +712,12 @@ def run_gui(port=None, view=None):
         }
         icon = mapping.get(status, ft.Icons.SCHEDULE)
         return ft.Container(
-            ft.Icon(icon, size=20, color=fg),
+            ft.Icon(icon, size=14, color=fg),
             bgcolor=bg, border_radius=14, padding=6)
 
     # ------------------------------------------------------------ ADD page
     def downloads_view(page: ft.Page):
-        url_count_txt = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT,
+        url_count_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
                                 weight=ft.FontWeight.W_500)
 
         def _on_url_change(e):
@@ -444,21 +726,47 @@ def run_gui(port=None, view=None):
             n = len(urls)
             url_count_txt.value = f"{n} URL{'s' if n != 1 else ''} detected" if n else ""
 
+        # NO expand=True. min_lines/max_lines already give the field a definite
+        # height, and expand put it in a Column whose height is unbounded (the
+        # page Column scrolls). Flutter refuses to lay that out: the field and
+        # everything beside it in the same Row vanished, leaving a ~190px blank
+        # gap and a view with no visible input. Verified against a minimal
+        # repro -- same tree with expand removed renders correctly.
         url_box = ft.TextField(
             label="Telegram link(s)",
             hint_text="https://t.me/channel/123\n(one per line)",
             prefix_icon=ft.Icons.LINK,
-            multiline=True, min_lines=4, max_lines=8, expand=True,
-            text_size=15, content_padding=14,
+            multiline=True, min_lines=5, max_lines=10,
+            text_size=13, content_padding=11,
             border_radius=12,
             on_change=_on_url_change)
         preview_list = ft.ListView(spacing=12, expand=True)
-        status_txt = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT,
+        status_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
                              expand=True)
+        status_icon = ft.Icon(ft.Icons.INFO_OUTLINE, size=13,
+                              color=ft.Colors.ON_SURFACE_VARIANT)
+        # The whole row hides when there is nothing to say. Hiding only the icon
+        # left an empty Text still holding a line, so an idle Add tab showed a
+        # blank band between the input and the output-mode toggle for no reason.
+        status_row = ft.Row([status_icon, status_txt], spacing=8,
+                            visible=False)
+
+        def _set_status(text: str):
+            """Set the status line, hiding the row entirely when it is empty.
+
+            One writer, so no call site has to remember to clear both the text
+            and the row that holds it.
+            """
+            status_txt.value = text or ""
+            status_row.visible = bool(text)
+            try:
+                page.update()
+            except Exception:
+                pass
         count_txt = ft.Text("No previews yet",
-                            size=13, color=ft.Colors.ON_SURFACE_VARIANT,
+                            size=12, color=ft.Colors.ON_SURFACE_VARIANT,
                             weight=ft.FontWeight.W_500)
-        selected_txt = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT,
+        selected_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
                                expand=True, weight=ft.FontWeight.W_500)
         fetch_btn = ft.FilledButton("Fetch titles", icon=ft.Icons.SEARCH,
                                     height=48, style=ft.ButtonStyle(
@@ -468,103 +776,66 @@ def run_gui(port=None, view=None):
                                  disabled=True, height=48, style=ft.ButtonStyle(
                                      text_style=ft.TextStyle(
                                          weight=ft.FontWeight.BOLD)))
-        fetch_label = ft.Text("Fetching titles...", size=13,
+        fetch_label = ft.Text("Fetching titles...", size=12,
                               color=ft.Colors.PRIMARY,
                               weight=ft.FontWeight.W_600, visible=False)
         bar = ft.ProgressBar(visible=False, bar_height=6)
         fetch_row = ft.Row([fetch_label, bar], spacing=8, visible=False)
 
-        # --- Mode selector: custom coloured cards ---
-        _mode_data = [
-            ("1", "Original", ft.Icons.FILE_DOWNLOAD,
-             "Raw file, fastest, no conversion"),
-            ("2", "Fast", ft.Icons.BOLT,
-             "Compressed MP4, veryfast, smaller"),
-            ("3", "Max", ft.Icons.HD,
-             "Best quality compressed, smallest"),
-        ]
-        _mode_cards = {}
-        # ResponsiveRow, not Row(wrap=True): a Row with wrap=True maps to
-        # Flutter's Wrap, whose children carry FlexParentData from expand=True.
-        # That combination collapsed the three cards into one full-width grey
-        # block, making the primary control invisible and unclickable.
-        _mode_row = ft.ResponsiveRow(spacing=12, run_spacing=12)
+        # --- Mode selector ------------------------------------------------
+        # A linked toggle, not three filled cards.
+        #
+        # The three-card version gave the OUTPUT MODE the same visual weight as
+        # the URL textarea -- the actual primary input -- by making it three
+        # large bordered blocks with a 2px accent border on the selected one.
+        # That is the card-soup mistake again, in a place where it hurts most:
+        # a secondary choice rendered as the loudest thing on the page.
+        #
+        # The reference does the opposite. From style.py:
+        #     box.linked > button { background-color: transparent }
+        #     box.linked > button:checked { background-color: @accent }
+        # One row, the checked segment filled, everything else flat. The
+        # explanation moves under it as a caption rather than inside each card.
+        _MODE_OPTS = [("1", "Original"), ("2", "Fast"), ("3", "Max")]
+        _MODE_DESC = {
+            "1": "Raw file, fastest, no conversion.",
+            "2": "Compressed MP4, veryfast, smaller.",
+            "3": "Best quality compressed, smallest.",
+        }
+        mode_blurb_txt = ft.Text(_MODE_DESC.get(state.get("mode", "1"), ""),
+                                 size=11, expand=True,
+                                 color=ft.Colors.ON_SURFACE_VARIANT)
 
-        def _refresh_mode_cards():
-            current = state.get("mode", "1")
-            for val, label, icon, desc in _mode_data:
-                card = _mode_cards[val]
-                is_sel = (val == current)
-                card.content = ft.Column([
-                    ft.Row([ft.Icon(icon, size=22,
-                                    color=(ft.Colors.PRIMARY if is_sel
-                                           else ft.Colors.ON_SURFACE_VARIANT)),
-                            ft.Text(label, size=15,
-                                    weight=(ft.FontWeight.BOLD if is_sel
-                                            else ft.FontWeight.W_500),
-                                    color=(ft.Colors.PRIMARY if is_sel
-                                           else ft.Colors.ON_SURFACE))],
-                           spacing=8),
-                    ft.Text(desc, size=11,
-                            color=ft.Colors.ON_SURFACE_VARIANT),
-                ], spacing=4)
-                card.border = (ft.Border.all(2, ft.Colors.PRIMARY)
-                               if is_sel
-                               else ft.Border.all(1, ft.Colors.OUTLINE_VARIANT))
-                card.bgcolor = (ft.Colors.PRIMARY_CONTAINER if is_sel
-                                else ft.Colors.SURFACE_CONTAINER_LOWEST)
-                card.ink = True
+        def _apply_mode(val: str):
+            """Single writer for the output mode.
 
-        def _on_mode_card(val):
+            Everything that changes the mode -- the toggle, the Settings hint
+            refresh, and the danger-zone reset -- goes through here, so the
+            toggle's painted state can never drift from the stored setting.
+            """
             state["mode"] = val
-            mode_seg.selected = [val]
-            _refresh_mode_cards()
             s = load_settings()
             s.output_mode = val
             save_settings(s)
+            mode_blurb_txt.value = _MODE_DESC.get(val, "")
             refresh_settings_hint()
-            page.update()
 
-        for val, label, icon, desc in _mode_data:
-            c = ft.Container(
-                ft.Column([], spacing=4),
-                padding=14,
-                border_radius=12,
-                # Grid cell sizing instead of expand=True: three across on
-                # desktop, full width on a phone.
-                col={"xs": 12, "sm": 4},
-                on_click=lambda e, v=val: _on_mode_card(v),
-            )
-            _mode_cards[val] = c
-            _mode_row.controls.append(c)
-        _refresh_mode_cards()
+        def _on_mode_pick(val):
+            _apply_mode(val)
+            try:
+                page.update()
+            except Exception:
+                pass
 
-        # Hidden SegmentedButton kept for state compatibility
-        mode_seg = ft.SegmentedButton(
-            segments=[ft.Segment(value="1", label=ft.Text("Original"),
-                                 icon=ft.Icons.FILE_DOWNLOAD,
-                                 tooltip="Original: raw file, fastest"),
-                      ft.Segment(value="2", label=ft.Text("Fast"),
-                                 icon=ft.Icons.BOLT,
-                                 tooltip="Fast: compressed MP4, veryfast"),
-                      ft.Segment(value="3", label=ft.Text("Max"),
-                                 icon=ft.Icons.HD,
-                                 tooltip="Max: best quality compressed")],
-            selected=[state["mode"] if state["mode"] in MODE_LABELS else "1"],
-            visible=False)
-        state["mode_seg"] = mode_seg
+        mode_toggle = ui.linked_toggle(
+            _MODE_OPTS, state.get("mode", "1"), _on_mode_pick)
 
-        def _on_mode(e):
-            sel = e.control.selected
-            if sel:
-                state["mode"] = next(iter(sel))
-                _refresh_mode_cards()
-                s = load_settings()
-                s.output_mode = state["mode"]
-                save_settings(s)
-                refresh_settings_hint()
-
-        mode_seg.on_change = _on_mode
+        # Reset (Settings -> danger zone) drives the toggle through this handle
+        # rather than poking a hidden control's `selected` list. The old
+        # SegmentedButton it replaced was visible=False and never read by
+        # anything else, so resetting the setting left the visible cards showing
+        # the old mode until the view was rebuilt.
+        state["mode_set"] = _apply_mode
 
         async def ensure_api_or_goto_settings():
             st = load_settings()
@@ -587,7 +858,7 @@ def run_gui(port=None, view=None):
                 snack(page, f"Capped at {MAX_URLS} URLs; extra links ignored.")
             state["fetching"] = True
             fetch_row.visible = True
-            status_txt.value = f"Fetching {len(urls)} title(s)..."
+            _set_status(f"Fetching {len(urls)} title(s)...")
             fetch_btn.disabled = True
             page.update()
             try:
@@ -595,7 +866,7 @@ def run_gui(port=None, view=None):
                 if not await c.is_user_authorized():
                     ok = await gui_login(page, c)
                     if not ok:
-                        status_txt.value = "Login cancelled."
+                        _set_status("Login cancelled.")
                         return
                 # This block used to sit AFTER the `raise` at the end of the
                 # RuntimeError handler below, which made it unreachable: the
@@ -607,7 +878,7 @@ def run_gui(port=None, view=None):
                 # `raise` without moving the success path. It shipped in v1.3.0.
                 state["previews"] = []
                 for u in urls:
-                    status_txt.value = f"Fetching: {_sanitize_display(u)}"
+                    _set_status(f"Fetching: {_sanitize_display(u)}")
                     page.update()
                     pv = await tg_client.fetch_preview(c, u)
                     state["previews"].append({
@@ -619,8 +890,8 @@ def run_gui(port=None, view=None):
                     })
                 render_previews()
                 n_ok = sum(1 for r in state["previews"] if r["ok"])
-                status_txt.value = (f"Found {n_ok}/{len(urls)} downloadable. "
-                                    f"Tick + edit titles, then Download selected.")
+                _set_status((f"Found {n_ok}/{len(urls)} downloadable. "
+                                    f"Tick + edit titles, then Download selected."))
                 dl_btn.disabled = n_ok == 0
             except RuntimeError as exc:
                 # An identity-pin mismatch surfaces as a RuntimeError from
@@ -638,18 +909,18 @@ def run_gui(port=None, view=None):
                         except Exception:
                             c = None
                     if c is not None and await _reset_identity_pin(page, c):
-                        status_txt.value = "Account pin cleared — sign in again."
+                        _set_status("Account pin cleared — sign in again.")
                         snack(page, "Account pin cleared. Sign in with the "
                                     "account you want to use.")
                         page.update()
                         return
-                    status_txt.value = msg
+                    _set_status(msg)
                     snack(page, msg, error=True)
                     page.update()
                     return
                 raise
             except Exception as exc:
-                status_txt.value = f"Fetch failed: {_sanitize_display(exc)}"
+                _set_status(f"Fetch failed: {_sanitize_display(exc)}")
                 snack(page, _sanitize_display(str(exc)), error=True)
             finally:
                 state["fetching"] = False
@@ -689,7 +960,7 @@ def run_gui(port=None, view=None):
                             render_previews()))
                     meta_row = ft.Row([
                         ft.Container(
-                            ft.Row([ft.Icon(ft.Icons.DESCRIPTION, size=14,
+                            ft.Row([ft.Icon(ft.Icons.DESCRIPTION, size=13,
                                             color=ft.Colors.ON_SURFACE_VARIANT),
                                     ft.Text(r["ext"].upper(), size=11,
                                             weight=ft.FontWeight.W_600,
@@ -698,7 +969,7 @@ def run_gui(port=None, view=None):
                             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
                             border_radius=6, padding=4),
                         ft.Container(
-                            ft.Row([ft.Icon(ft.Icons.STORAGE, size=14,
+                            ft.Row([ft.Icon(ft.Icons.STORAGE, size=13,
                                             color=ft.Colors.ON_SURFACE_VARIANT),
                                     ft.Text(format_bytes(r["size"]), size=11,
                                             weight=ft.FontWeight.W_600,
@@ -843,102 +1114,110 @@ def run_gui(port=None, view=None):
             count_txt.value = "No previews yet"
             selected_txt.value = ""
             dl_btn.disabled = True
-            status_txt.value = ""
+            _set_status("")
             page.update()
 
         fetch_btn.on_click = on_fetch
         dl_btn.on_click = on_download
         render_previews()
 
-        # --- Section header helper with icon badge ---
-        def _section_header(icon, title, subtitle=None):
-            head = [ft.Text(title, size=17, weight=ft.FontWeight.BOLD)]
-            if subtitle:
-                head.append(ft.Text(subtitle, size=12,
-                                    color=ft.Colors.ON_SURFACE_VARIANT))
-            return ft.Row([
-                ft.Container(
-                    ft.Icon(icon, size=18, color=ft.Colors.PRIMARY),
-                    bgcolor=ft.Colors.PRIMARY_CONTAINER,
-                    border_radius=8, padding=6),
-                ft.Column(head, spacing=2, expand=True),
-            ], spacing=10)
-
         return ft.Column([
-            h1(ft.Icons.DOWNLOAD, "Telegram Downloader",
+            h1(ft.Icons.DOWNLOAD, "Add downloads",
                "Paste t.me links, fetch titles, then queue downloads."),
-            ft.Container(
-                ft.Column([
-                    _section_header(ft.Icons.LINK, "Add Download",
-                                    "One link per line"),
-                    ft.Container(height=8),
-                    url_box,
-                    ft.Row([url_count_txt], spacing=4),
-                    ft.Container(height=8),
-                    _section_header(ft.Icons.TUNE, "Output Mode",
-                                    "Choose quality / speed trade-off"),
-                    ft.Container(height=8),
-                    _mode_row,
-                    mode_seg,
-                    ft.Container(height=12),
-                    ft.Row([
-                        fetch_btn,
-                        ft.OutlinedButton("Load .txt",
-                                          icon=ft.Icons.FILE_OPEN,
-                                          on_click=on_load_file),
-                        ft.TextButton("Clear", icon=ft.Icons.CLEAR,
-                                      on_click=on_clear),
-                    ], spacing=12, wrap=True),
-                    fetch_row,
-                    ft.Row([ft.Icon(ft.Icons.INFO_OUTLINE, size=16,
-                                    color=ft.Colors.ON_SURFACE_VARIANT),
-                            status_txt], spacing=8),
-                ], spacing=0),
-                padding=20, border_radius=16,
-                bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+
+            # The textarea IS the card.
+            #
+            # This view used to open with a 20px-padded SURFACE_CONTAINER_LOW
+            # slab holding a section header, the textarea, an output-mode
+            # picker and three buttons -- then a second identical slab for the
+            # preview and a third for two buttons. Three boxes of equal weight
+            # on an empty page, with the only thing the user came here to do
+            # (paste a link) buried in the middle of the first one.
+            #
+            # Now there is no card around the input at all: the TextField's own
+            # border is the frame, which is what the reference does
+            # (`textview.url-input { border-color: ... }` with nothing wrapped
+            # around it). Wrapping it in ui.card() put a border inside a border
+            # and read as two competing boxes. The primary action sits directly
+            # beside the input; the detected-URL count, the mode toggle and the
+            # secondary actions sit on the bare scaffold under muted labels,
+            # exactly how the reference lays out its settings form.
+            ft.Row(
+                [
+                    _grow(ft.Column(
+                        [url_box,
+                         ft.Row([url_count_txt,
+                                 ft.Container(expand=True),
+                                 ft.Text("one link per line", size=11,
+                                         font_family="monospace",
+                                         color=ft.Colors.ON_SURFACE_VARIANT)],
+                                spacing=8)],
+                        spacing=6,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    )),
+                    # Actions stacked beside the input rather than below it, so
+                    # the eye does not have to travel past the textarea to find
+                    # the button that uses what was typed into it.
+                    #
+                    # An explicit width, not expand: the input takes the slack
+                    # and the buttons stay one comfortable click-target wide.
+                    ft.Container(
+                        width=176,
+                        content=ft.Column(
+                            [fetch_btn,
+                             ft.OutlinedButton("Load .txt",
+                                               icon=ft.Icons.FILE_OPEN,
+                                               on_click=on_load_file,
+                                               style=_ink_button_style()),
+                             ui.flat_button("Clear", ft.Icons.CLEAR,
+                                            on_clear)],
+                            spacing=8, tight=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
+                    ),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.START,
             ),
-            ft.Container(
-                ft.Column([
-                    _section_header(ft.Icons.PLAYLIST_ADD_CHECK,
-                                    "Preview",
-                                    "Confirm before download"),
-                    ft.Container(height=8),
-                    ft.Row([count_txt,
-                            ft.TextButton("Select all", on_click=on_select_all),
-                            ft.TextButton("Select none",
-                                          on_click=on_select_none)],
-                           spacing=8),
-                    ft.Container(height=4),
-                    preview_list,
-                    ft.Container(height=8),
-                    # No wrap=True: the Flutter Wrap cannot hold expand=True
-                    # children, and the combination collapsed the layout into
-                    # an unbounded (~100k px) scroll gap that pushed the primary
-                    # "Download selected" CTA off-screen.
-                    ft.Row([selected_txt, dl_btn],
-                           spacing=12,
-                           alignment=ft.MainAxisAlignment.END),
-                ], spacing=0),
-                padding=20, border_radius=16,
-                bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+
+            fetch_row,
+            status_row,
+
+            # Output mode: muted label, linked toggle, explanation underneath.
+            ft.Column(
+                [ui.section_label("Output mode"),
+                 ft.Row([mode_toggle, mode_blurb_txt], spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.START,
             ),
-            ft.Container(
-                ft.Column([
-                    _section_header(ft.Icons.BOLT, "Quick Actions"),
-                    ft.Container(height=8),
-                    ft.Row([
-                        ft.OutlinedButton("Open folder",
-                                          icon=ft.Icons.FOLDER_OPEN,
-                                          on_click=lambda e: open_folder(page)),
-                        ft.OutlinedButton("Settings",
-                                          icon=ft.Icons.SETTINGS,
-                                          on_click=lambda e: nav["goto"](2) if "goto" in nav else None),
-                    ], spacing=12, run_spacing=12, wrap=True),
-                ], spacing=0),
-                padding=20, border_radius=16,
-                bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+
+            # Preview. No outer card -- preview_list already renders each row
+            # as its own card, so wrapping the list in a fourth box would put a
+            # border around a stack of borders.
+            ft.Column(
+                [ft.Row(
+                    [ui.section_label("Preview"), ft.Container(expand=True),
+                     count_txt,
+                     ft.TextButton("Select all", on_click=on_select_all),
+                     ft.TextButton("Select none", on_click=on_select_none)],
+                    spacing=8),
+                 preview_list,
+                 # No wrap=True: the Flutter Wrap cannot hold expand=True
+                 # children, and the combination collapsed the layout into an
+                 # unbounded (~100k px) scroll gap that pushed the primary
+                 # "Download selected" CTA off-screen.
+                 ft.Row([selected_txt, dl_btn], spacing=12,
+                        alignment=ft.MainAxisAlignment.END),
+                ],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                # The list is the only part of this view that should grow to
+                # fill a tall window. expand on the Column, not on the page.
+                expand=True,
             ),
-        ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+        ], spacing=20, scroll=ft.ScrollMode.AUTO, expand=True,
+           horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def open_folder(page):
         # limit display of full path in snacks: redact home
@@ -1171,19 +1450,31 @@ def run_gui(port=None, view=None):
 
     def refresh_queue():
         nonlocal _queue_empty_shown
-        # Flet >= 0.86 raises RuntimeError reading .page of a detached control.
-        try:
-            pg = queue_list.page if queue_list is not None else None
-        except RuntimeError:
-            pg = None
-        if pg is None:
+        # The page comes from _main_page, NOT from queue_list.page.
+        #
+        # It used to probe the control: `queue_list.page`, and bail when that
+        # was None. That probe is wrong in the one place it matters. on_nav()
+        # assigns body_content.content = views[idx] and then calls
+        # refresh_queue() -- but a Flet tree is not mounted until page.update()
+        # runs, so the freshly-selected view is still detached at that instant.
+        # Every tab switch to Queue therefore bailed out, and the list stayed
+        # empty until something called refresh_queue() again later, which only
+        # happened once a download was already running. In practice: open a
+        # fresh queue, add nothing, start nothing, and the tab is blank even
+        # with rows sitting in the store.
+        #
+        # Rendering into a detached view is harmless -- the controls are built
+        # either way and are serialised the next time the view is mounted.
+        page = _main_page
+        if page is None:
+            # _main has not run yet (build-time construction). Nothing to
+            # repaint, but keep the store's on-disk copy current.
             try:
                 store.save()
             except Exception:
                 pass
             return
         import flet as ft
-        page = pg
         items = list(store.items)
         # Active + queued first, finished at the bottom (newest first within
         # each group, matching the old reversed chronological display).
@@ -1244,20 +1535,26 @@ def run_gui(port=None, view=None):
             if old_id not in current_ids:
                 del _queue_widgets[old_id]
         
+        # The empty state is a SIBLING of the ListView (see queue_empty in
+        # queue_view), not a child of it. Appending it to queue_list looked
+        # right and produced nothing on screen: refresh_queue() runs while
+        # queue_view() is still building, so the control is mounted by a
+        # page.update() that has no page to update yet. An empty queue showed a
+        # bare toolbar over an empty screen. Toggling a sibling's `visible`
+        # needs no such thing -- it is already mounted by the time any item
+        # arrives.
+        queue_empty.visible = not items
+        queue_list.visible = bool(items)
+
         if not items:
-            # An explicit flag, not a type/isinstance sniff: both the item
-            # cards and empty_state() are ft.Container, so the old check could
-            # never tell them apart and the empty state was never removed
-            # (it also never called page.update() on this early return).
             if not _queue_empty_shown:
                 queue_list.controls.clear()
-                queue_list.controls.append(empty_state(
-                    ft.Icons.DOWNLOAD_DONE, "No downloads in queue",
-                    "Add links from the Add tab to get started.",
-                    action_label="Add downloads", action_icon=ft.Icons.ADD,
-                    on_action=lambda e: nav["goto"](0) if "goto" in nav else None))
+                header.value = "Downloads (0)"
                 _queue_empty_shown = True
-                page.update()
+                try:
+                    page.update()
+                except Exception:
+                    pass
             return
 
         if _queue_empty_shown:
@@ -1278,9 +1575,9 @@ def run_gui(port=None, view=None):
                     widgets['progress_bar'].value = pct / 100
                 # Update percentage pill
                 if widgets.get('pct_pill'):
-                    inner = widgets['pct_pill'].content
-                    if inner is not None and hasattr(inner, "value"):
-                        inner.value = f"{pct:.1f}%"
+                    # A bare ft.Text now, so the value is set directly. It used
+                    # to reach through .content into the pill's Text.
+                    widgets['pct_pill'].value = f"{pct:.1f}%"
                 # Update detail text
                 if widgets.get('detail_txt'):
                     speed = getattr(it, "download_speed", 0) or 0
@@ -1296,39 +1593,42 @@ def run_gui(port=None, view=None):
                 # Create new widgets for this item
                 subtitle_bits = [b for b in
                                  [it.ext or "", format_bytes(it.total_bytes or it.size)] if b]
+                # Flat 28px icon buttons, no filled chip behind each one.
+                # The old version wrapped every action in its own
+                # SURFACE/PRIMARY_CONTAINER/ERROR_CONTAINER square, so a row
+                # with a retry and a stop showed two saturated badges sitting
+                # above the status text -- louder than the filename they belong
+                # to. Reference: button.image-button, flat, ink on hover.
                 actions = []
                 if it.status in ("error", "cancelled"):
-                    actions.append(ft.Container(
-                        ft.IconButton(ft.Icons.REFRESH, tooltip="Retry",
-                                      icon_color=ft.Colors.PRIMARY,
-                                      style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))),
-                        bgcolor=ft.Colors.PRIMARY_CONTAINER,
-                        border_radius=8, padding=2))
-                    actions[-1].content.on_click = lambda e, _id=it.id: (
-                        store.update(_id, status="queued", error=""),
-                        start_soon(page))
+                    actions.append(ui.icon_button(
+                        ft.Icons.REFRESH, "Retry",
+                        lambda e, _id=it.id: (store.update(_id, status="queued",
+                                                          error=""),
+                                             start_soon(page))))
                 if it.status in ("downloading", "converting", "fetching"):
-                    actions.append(ft.Container(
-                        ft.IconButton(ft.Icons.STOP_CIRCLE_OUTLINED,
-                                      tooltip="Stop current download\n(rest stay queued)",
-                                      icon_color=ft.Colors.ERROR,
-                                      style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))),
-                        bgcolor=ft.Colors.ERROR_CONTAINER,
-                        border_radius=8, padding=2))
-                    actions[-1].content.on_click = lambda e, _id=it.id: cancel_id(
-                        page, _id)
+                    actions.append(ui.icon_button(
+                        ft.Icons.STOP_CIRCLE_OUTLINED,
+                        "Stop current download (rest stay queued)",
+                        lambda e, _id=it.id: cancel_id(page, _id),
+                        destructive=True))
                 if it.status not in ("downloading", "converting", "fetching"):
-                    actions.append(ft.Container(
-                        ft.IconButton(ft.Icons.CLOSE, tooltip="Remove",
-                                      icon_color=ft.Colors.ON_SURFACE_VARIANT,
-                                      style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))),
-                        bgcolor=ft.Colors.SURFACE_CONTAINER,
-                        border_radius=8, padding=2))
-                    actions[-1].content.on_click = lambda e, _id=it.id: (
-                        store.remove(_id), refresh_queue())
+                    actions.append(ui.icon_button(
+                        ft.Icons.CLOSE, "Remove",
+                        lambda e, _id=it.id: (store.remove(_id),
+                                             refresh_queue()),
+                        destructive=True))
                 title_txt = _sanitize_display(f"{it.title}{it.ext}", limit=120)
-                title_col: list = [ft.Text(title_txt, size=14, weight=ft.FontWeight.W_600,
-                                           max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)]
+                # Wraps to two lines rather than ellipsising. no_wrap=True +
+                # max_lines=1 + overflow=ELLIPSIS is the obvious way to do this
+                # and it does not work here: flet 0.86.5 clips the string at
+                # the card edge with no ellipsis and no wrap, so a long title
+                # just stopped mid-word. Two lines always shows a complete,
+                # predictable amount of the name at any window width.
+                title_col: list = [ft.Text(title_txt, size=13,
+                                           weight=ft.FontWeight.W_600,
+                                           max_lines=2,
+                                           overflow=ft.TextOverflow.ELLIPSIS)]
                 if subtitle_bits:
                     title_col.append(ft.Text("  \u2022  ".join(subtitle_bits), size=11,
                                              color=ft.Colors.ON_SURFACE_VARIANT))
@@ -1337,17 +1637,22 @@ def run_gui(port=None, view=None):
                 pct_pill_widget = pct_pill(f"{pct:.1f}%") if it.status in (
                     "downloading", "converting") else ft.Container()
                 
+                # Row anatomy follows the reference's .download-row:
+                #   title (13px/600)
+                #   6px progress, flush under the title
+                #   status line ................. [x] [v] [pause]
+                # Actions sit on the status line at the right, not stacked at
+                # the top-right of the title. They act on the transfer, which is
+                # what the status line describes, and putting them there stops
+                # the header row from reflowing every time an item changes
+                # state.
                 head_row = ft.Row([state_icon(it.status),
-                            ft.Column(title_col, spacing=2, expand=True),
-                            pct_pill_widget,
-                            *actions], spacing=8,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                                   ft.Column(title_col, spacing=2, expand=True),
+                                   pct_pill_widget],
+                                  spacing=8,
+                                  vertical_alignment=ft.CrossAxisAlignment.CENTER)
                 card_body: list = [head_row]
-                
-                # Plain-language status line for idle states (queued/done/cancelled).
-                if it.status in ("queued", "cancelled"):
-                    card_body.append(status_label(it.status))
-                
+
                 progress_bar = None
                 detail_txt = None
                 if it.status in ("downloading", "converting"):
@@ -1357,55 +1662,80 @@ def run_gui(port=None, view=None):
                               + speed_txt
                               + ("  \u2022  converting\u2026" if it.status == "converting"
                                  else "  \u2022  downloading\u2026"))
-                    progress_bar = ft.ProgressBar(value=pct / 100, bar_height=8,
-                                                  border_radius=4,
-                                                  color=ft.Colors.PRIMARY,
-                                                  bgcolor=ft.Colors.SURFACE_CONTAINER)
+                    progress_bar = ui.progress_bar(pct / 100)
                     detail_txt = ft.Text(detail, size=11,
                                          color=ft.Colors.ON_SURFACE_VARIANT,
                                          weight=ft.FontWeight.W_500)
-                    card_body += [progress_bar, detail_txt]
-                
+                    # The bar is a button. It already looks like a scrubber, so
+                    # clicking it has to do something -- see toggle_pause. The
+                    # padding is vertical-only: a 6px bar is a miserable click
+                    # target, and the hit area is grown without the card
+                    # gaining a visible edge.
+                    card_body.append(ft.Container(
+                        content=progress_bar,
+                        padding=ft.Padding(0, 7, 0, 7),
+                        on_click=lambda e, _id=it.id: toggle_pause(page, _id),
+                        tooltip="Pause this download (it resumes from where "
+                                "it stopped)",
+                    ))
+                elif it.status in ("queued", "cancelled"):
+                    # Plain-language status line for idle states.
+                    detail_txt = status_label(it.status)
+                elif it.status == "fetching":
+                    detail_txt = ft.Text("Looking up file details\u2026", size=11,
+                                         color=ft.Colors.ON_SURFACE_VARIANT)
+                else:
+                    detail_txt = None
+
+                # Outcome first, actions last. A finished row used to render
+                # its action icons on a line of their own, then the destination
+                # or error text BELOW them -- so the controls floated in the
+                # middle of the card, above the thing they refer to. Actions
+                # belong on the final line, bottom-right.
                 if it.status == "error" and it.error:
-                    card_body.append(error_box(_sanitize_display(it.error)))
+                    card_body.append(_row_note(
+                        ft.Icons.ERROR_OUTLINE, ft.Colors.ERROR,
+                        _sanitize_display(it.error)))
                 if it.status == "done":
                     if it.dest:
-                        card_body.append(ft.Container(
-                            ft.Row([
-                                ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE, size=16,
-                                        color=ft.Colors.TERTIARY),
-                                ft.Text(it.dest, size=11, expand=True,
-                                        color=ft.Colors.ON_SURFACE_VARIANT,
-                                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                            ], spacing=6),
-                            bgcolor=ft.Colors.TERTIARY_CONTAINER,
-                            border_radius=8, padding=8))
+                        card_body.append(_row_note(
+                            ft.Icons.CHECK_CIRCLE_OUTLINE, ft.Colors.TERTIARY,
+                            it.dest, mono=True))
                     elif it.error:
                         # Kept-original note (e.g. ffmpeg missing) surfaces here.
                         card_body.append(hint_box(it.error))
+
+                # Status line: what is happening on the left, what you can do
+                # about it on the right.
+                if detail_txt is not None or actions:
+                    card_body.append(ft.Row(
+                        [detail_txt if detail_txt is not None
+                         else ft.Container(expand=True),
+                         *(actions if detail_txt is not None
+                           else [ft.Container(expand=True), *actions])],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ))
                 
-                card_side = ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)
-                card = ft.Container(
-                    ft.Column(card_body, spacing=8),
-                    padding=14,
-                    border_radius=12,
-                    bgcolor=ft.Colors.SURFACE,
-                    border=ft.Border(top=card_side, right=card_side,
-                                     bottom=card_side, left=card_side))
+                # The one place a card is correct: this is a list item. Same
+                # 12px radius / 1px hairline / 12px pad as every other card.
+                card = ui.card(ft.Column(card_body, spacing=8))
                 new_controls.append(card)
                 
                 # Store references to mutable widgets
                 _queue_widgets[it.id] = {
                     'card': card,
                     'progress_bar': progress_bar,
-                    # Only cache a REAL pill. The old guard was
-                    # `hasattr(pct_pill_widget, "content")`, which is True for
-                    # every ft.Container because `content` is a dataclass field
-                    # -- a bare ft.Container() has content=None, so the next
-                    # refresh did `None.value = ...` and raised AttributeError,
-                    # killing the queue view (and with it the app).
+                    # Only cache a REAL pill. Two guards have been wrong here,
+                    # and both killed the queue view (and with it the app) by
+                    # making the next refresh do `None.value = ...`:
+                    #   - `hasattr(w, "content")` is True for every ft.Container,
+                    #     because `content` is a dataclass field.
+                    #   - `getattr(w, "content", None) is not None` is False for
+                    #     the current ft.Text, which has no `content` at all.
+                    # Test for the type the update path actually writes to.
                     'pct_pill': (pct_pill_widget
-                                 if getattr(pct_pill_widget, "content", None) is not None
+                                 if isinstance(pct_pill_widget, ft.Text)
                                  else None),
                     'detail_txt': detail_txt,
                 }
@@ -1438,16 +1768,60 @@ def run_gui(port=None, view=None):
             else:
                 snack(page, "Already stopping…", error=True)
 
+    def toggle_pause(page, target_id):
+        """Pause an active download, or resume a paused one.
+
+        Users read the progress bar as a control -- it looks exactly like the
+        scrubber on a media player, so they drag and click it expecting it to
+        respond. ft.ProgressBar is display-only, so every one of those clicks
+        did nothing at all, which read as a broken app rather than a read-only
+        indicator. Clicking it now pauses; clicking again resumes.
+
+        Pause goes through cancel_id, which sets the run's cancel event. That
+        looks drastic but it is the only stop primitive the engine has, and
+        download_resumable() keeps the <name>.part plus its sidecar, so the
+        next run continues from the byte offset instead of starting over. Only
+        one batch runs at a time, so pausing one item does pause the batch.
+        """
+        it = store.get(target_id)
+        if not it:
+            return
+        if it.status in ("downloading", "converting", "fetching"):
+            cancel_id(page, target_id)
+            return
+        if it.status == "cancelled":
+            # Re-queue and let start_queue's re-drain pick it up, clearing the
+            # error so the row does not still read "cancelled".
+            store.update(target_id, status="queued", error="")
+            refresh_queue()
+            snack(page, "Resuming — continues from where it stopped.")
+            start_soon(page)
+            return
+        snack(page, "Only a running or paused download can be paused.",
+              error=True)
+
+    # Bound before queue_view/refresh_queue can run: refresh_queue() reads and
+    # writes it, and it is called from more than one place.
     _queue_empty_shown = False
+    queue_empty = ft.Container()
+    # The live ft.Page, captured in _main. refresh_queue() and
+    # refresh_settings_hint() need a page to repaint and cannot get one from a
+    # control, because the view holding that control may be detached.
+    _main_page = None
 
     def queue_view(page: ft.Page):
         import flet as ft
-        nonlocal queue_list, _queue_empty_shown
+        nonlocal queue_list, _queue_empty_shown, queue_empty
         _queue_empty_shown = False
         queue_list = ft.ListView(spacing=10, expand=True)
-        header = ft.Text(f"Downloads ({len(store.items)})", size=20,
+        queue_empty = empty_state(
+            ft.Icons.DOWNLOAD_DONE, "No downloads in queue",
+            "Add links from the Add tab to get started.",
+            action_label="Add downloads", action_icon=ft.Icons.ADD,
+            on_action=lambda e: nav["goto"](0) if "goto" in nav else None)
+        header = ft.Text(f"Downloads ({len(store.items)})", size=14,
                          weight=ft.FontWeight.BOLD)
-        summary = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+        summary = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
         queue_header_txt["ctrl"] = header
         queue_header_txt["summary"] = summary
 
@@ -1461,35 +1835,37 @@ def run_gui(port=None, view=None):
                 state["cancel"].set()
                 snack(page, "Stopping queue — current file is cancelled, the rest stay queued.")
 
-        toolbar = ft.Container(
-            ft.Column([
-                ft.Row([
-                    ft.Icon(ft.Icons.DOWNLOADING, size=22,
-                            color=ft.Colors.PRIMARY),
-                    header,
-                    ft.Container(expand=True),
-                    ft.TextButton("Clear finished", icon=ft.Icons.DELETE_SWEEP,
-                                  on_click=lambda e: (store.clear_finished(),
-                                                      refresh_queue())),
-                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                summary,
-                ft.Row([
-                    ft.FilledButton("Resume all / Start",
-                                    icon=ft.Icons.PLAY_ARROW,
-                                    on_click=on_resume_all),
-                    ft.OutlinedButton("Cancel batch", icon=ft.Icons.STOP_CIRCLE_OUTLINED,
-                                      on_click=on_cancel),
-                ], spacing=10, wrap=True),
-            ], spacing=12),
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            border_radius=14, padding=18)
+        # Bare toolbar on the scaffold. This was a SURFACE_CONTAINER slab, so
+        # the page opened with a 18px-padded box containing a title, a summary
+        # and two buttons -- and then a stack of cards below it. The queue
+        # itself is the content; the controls are chrome.
+        toolbar = ft.Row([
+            ft.Icon(ft.Icons.DOWNLOADING, size=14, color=ft.Colors.PRIMARY),
+            header,
+            ft.Container(expand=True),
+            summary,
+            ft.TextButton("Clear finished", icon=ft.Icons.DELETE_SWEEP,
+                          on_click=lambda e: (store.clear_finished(),
+                                              refresh_queue())),
+            ui.flat_button("Resume all / Start", ft.Icons.PLAY_ARROW,
+                           on_resume_all),
+            ui.flat_button("Cancel batch", ft.Icons.STOP_CIRCLE_OUTLINED,
+                           on_cancel, destructive=True),
+        ], spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER)
         refresh_queue()
         return ft.Column([
             h1(ft.Icons.QUEUE, "Queue",
                "Track progress, retry errors, clear finished downloads."),
             toolbar,
+            queue_empty,
             queue_list,
-        ], spacing=16, expand=True)
+        ], spacing=16, expand=True,
+           # STRETCH so every queue card is exactly the width of the widest one.
+           # Without it the ListView hands each child its intrinsic width, cards
+           # come out ragged, and the scrollbar tracks the tallest rather than
+           # the widest.
+           horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     # ------------------------------------------------------------ settings
     settings_refs: dict = {}
@@ -1499,6 +1875,11 @@ def run_gui(port=None, view=None):
             st = load_settings()
             if settings_refs.get("mode_txt") is not None:
                 settings_refs["mode_txt"].value = MODE_LABELS.get(st.output_mode, st.output_mode)
+            # The blurb has to track the mode too: it is chosen on the Add tab,
+            # so a stale explanation next to a fresh label is worse than none.
+            if settings_refs.get("mode_blurb") is not None:
+                settings_refs["mode_blurb"].value = MODE_BLURB.get(
+                    st.output_mode, MODE_BLURB["1"])
             if settings_refs.get("folder_txt") is not None:
                 settings_refs["folder_txt"].value = st.download_dir or str(default_download_dir())
         except Exception:
@@ -1517,19 +1898,24 @@ def run_gui(port=None, view=None):
         _fld_kw = dict(border=_fld_border,
                        focused_border_width=2, focused_border_color=ft.Colors.PRIMARY,
                        border_radius=10, content_padding=ft.Padding(16, 14, 16, 14),
-                       text_size=14)
+                       text_size=13)
         # Built per-view, not at import: ft.Colors.* resolves against the
         # active theme at access time, so a module-level constant would freeze
         # whichever theme happened to be active on first import.
-        _label_style = ft.TextStyle(size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-        api_id_f = ft.TextField(label="API ID", label_style=_label_style,
-                                value=st.api_id or "", **_fld_kw)
-        api_hash_f = ft.TextField(label="API hash (keep private)", label_style=_label_style,
-                                  value=st.api_hash or "",
-                                  password=True, can_reveal_password=True, **_fld_kw)
+        _label_style = ft.TextStyle(size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        # No `label=` on these fields: labelled() renders the caption above the
+        # box so it can share that row with a right-aligned hint. Leaving the
+        # Flet label in place as well printed the field name twice.
+        api_id_f = ft.TextField(value=st.api_id or "", **_fld_kw)
+        api_hash_f = ft.TextField(value=st.api_hash or "",
+                                  password=True, can_reveal_password=True,
+                                  **_fld_kw)
+        # No expand=True: the parent is the scrollable settings Column, where an
+        # expanded TextField lays out at zero size and renders nothing. The
+        # surrounding group() already stretches it via STRETCH.
         dl_f = ft.TextField(label="Download folder", label_style=_label_style,
                             value=st.download_dir or str(default_download_dir()),
-                            expand=True, **_fld_kw)
+                            **_fld_kw)
         folder_error = ft.Container(visible=False)
 
         def _validate_folder(e):
@@ -1555,8 +1941,9 @@ def run_gui(port=None, view=None):
                 pass
 
         dl_f.on_change = _validate_folder
-        mode_txt = ft.Text(MODE_LABELS.get(st.output_mode, st.output_mode), size=14)
-        folder_txt = ft.Text(st.download_dir or str(default_download_dir()), size=14,
+        mode_txt = ft.Text(MODE_LABELS.get(st.output_mode, st.output_mode),
+                           size=13, weight=ft.FontWeight.W_600)
+        folder_txt = ft.Text(st.download_dir or str(default_download_dir()), size=13,
                              max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         settings_refs.update(mode_txt=mode_txt, folder_txt=folder_txt)
         settings_error = ft.Container(visible=False)
@@ -1689,15 +2076,14 @@ def run_gui(port=None, view=None):
                 else:
                     snack(page, "Logged out — server session revoked, files removed.")
 
-        check_updates_btn = ft.FilledTonalButton("Check for Updates", icon=ft.Icons.UPDATE)
-
         async def on_check_updates(e):
-            check_updates_btn.disabled = True
-            check_updates_btn.text = "Checking..."
-            check_updates_btn.icon = ft.Icons.HOURGLASS_EMPTY
-            page.update()
+            # No button bookkeeping here any more. This handler used to poke
+            # check_updates_btn.disabled/text/icon by hand, which was the old
+            # way of signalling "busy" -- it left the button live-looking for
+            # the whole network round-trip. pending_button() now owns that state
+            # (disabled + spinner for the duration of the await), so the handler
+            # only has to do the work.
             try:
-                snack(page, "Checking for updates...")
                 info = await asyncio.to_thread(updates.check_for_update)
                 if info is None:
                     snack(page, "Could not reach the update server.", error=True)
@@ -1713,15 +2099,9 @@ def run_gui(port=None, view=None):
                         snack(page, f"Cannot open browser: {exc}", error=True)
                 elif choice == "download":
                     await download_installer(page, info)
-            finally:
-                check_updates_btn.disabled = False
-                check_updates_btn.text = "Check for Updates"
-                check_updates_btn.icon = ft.Icons.UPDATE
-                page.update()
-
-        # Bound here (not in the constructor): on_check_updates closes over
-        # check_updates_btn, and the def must exist before it is referenced.
-        check_updates_btn.on_click = on_check_updates
+            except Exception as exc:
+                snack(page, f"Update check failed: {_sanitize_display(str(exc))}",
+                      error=True)
 
         async def download_installer(page, info):
             asset = updates.installable_asset(info)
@@ -1735,10 +2115,13 @@ def run_gui(port=None, view=None):
                 except Exception:
                     pass
                 return
-            # The check-for-updates button is the only control this flow can
-            # be re-entered from; disable it so a second click cannot start a
-            # second download/install while one is already in flight.
-            check_updates_btn.disabled = True
+            # No re-entrancy guard needed here. This used to disable
+            # check_updates_btn for the duration of the download so a second
+            # click could not start a second install. pending_button() already
+            # holds the button disabled for the whole await chain, and
+            # on_check_updates awaits this function -- so the guard was both
+            # redundant and, once that button was removed from the tree, a
+            # NameError waiting to happen.
             snack(page, f"Downloading {asset.name}...")
             try:
                 token = os.environ.get("GITHUB_TOKEN") or ""
@@ -1749,8 +2132,6 @@ def run_gui(port=None, view=None):
             except Exception as exc:
                 snack(page, f"Download failed: {exc}", error=True)
                 return
-            finally:
-                check_updates_btn.disabled = False
 
             # From here the file is verified and on disk. Installing runs it
             # as root through pkexec, so it is a separate, explicit step with
@@ -1792,16 +2173,18 @@ def run_gui(port=None, view=None):
             ]
 
         async def on_reset(e):
-            # Destructive two-step: reset options, clear the saved session and
-            # the pending download queue. A stray click must not nuke secrets.
-            # The confirm button is labelled for what it actually does (Reset),
-            # not the downloads dialog's default "Download".
-            cp = await confirm_dialog(
+            # Destructive and irreversible: clears the saved Telegram session,
+            # the credentials and the whole queue. A plain yes/no sat one stray
+            # click away from wiping a logged-in session, so this now requires
+            # typing the word.
+            cp = await typed_confirm_dialog(
                 page,
                 "Reset everything?",
-                "This clears your saved credentials, logs out the Telegram "
-                "session, and empties the download queue. This cannot be undone.",
-                action="Reset everything", icon=ft.Icons.WARNING_AMBER)
+                "This signs you out of Telegram, deletes your saved API "
+                "credentials, and empties the download queue. Files already "
+                "downloaded are not touched. This cannot be undone.",
+                phrase="RESET", action="Reset everything",
+                icon=ft.Icons.WARNING_AMBER)
             if not cp:
                 return
             if state.get("cancel") and not state.get("cancel").is_set():
@@ -1820,138 +2203,166 @@ def run_gui(port=None, view=None):
             except Exception:
                 pass
             try:
-                mg = state.get("mode_seg")
-                if mg is not None:
-                    mg.selected = ["1"]
+                # Drive the visible toggle, not a hidden control. The old
+                # SegmentedButton this replaced was visible=False and read by
+                # nothing else, so a reset left the painted mode cards showing
+                # the old mode until the view happened to be rebuilt.
+                ms = state.get("mode_set")
+                if ms is not None:
+                    ms("1")
             except Exception:
                 pass
             refresh_queue()
             refresh_settings_hint()
             snack(page, "Reset complete. Re-enter API credentials.")
 
-        # ── Redesigned layout ──────────────────────────────────────
+        # ── Layout ────────────────────────────────────────────────────
         first = not st.api_id or not st.api_hash or not st.download_dir
 
-        # --- Section 1: API Credentials ---
+        # What each output mode does lives in MODE_BLURB (module level, so the
+        # shared refresh_settings_hint can keep it in step with the Add tab).
+        _mk = st.output_mode if st.output_mode in MODE_BLURB else "1"
+
+        # --- Actions ---------------------------------------------------
+        # These act on the credentials above, so they sit inside that group.
+        # Floating between groups made them look unrelated to anything.
+        action_buttons = ft.Row([
+            pending_button("Save", ft.Icons.SAVE, on_save, kind="filled"),
+            pending_button("Verify / Login", ft.Icons.LOGIN, on_login,
+                           kind="tonal"),
+            pending_button("Log out", ft.Icons.LOGOUT, on_logout,
+                           kind="outline"),
+        ], spacing=10, wrap=True)
+
+        # --- Account ---------------------------------------------------
+        # The two credential fields sit SIDE BY SIDE and share the full width,
+        # rather than stacking as two half-filled rows. Stacking is what forced
+        # the FIELD_MAX cap in the first place -- one 520px field on a 1900px
+        # window left half the row empty and read as a broken layout. Side by
+        # side, each field is still a sane measure and the row is full. Same
+        # shape the reference uses for "Default video format & quality":
+        #     [MP4 v]        [2160p (4K) v]
         api_card_body = []
         if first:
-            api_card_body.append(hint_box(
-                "API credentials are required once, then stored privately (0600)."))
+            # Bare caption, not a box. It is advice, not data, and the reference
+            # gives its equivalent notes no border either -- a note with its own
+            # frame outranks the fields it is explaining.
+            api_card_body.append(ui.caption(
+                "Create these at my.telegram.org → API development tools. "
+                "They are stored privately (0600) and only asked once."))
+        # The field labels live outside the border so each can carry a
+        # right-aligned hint saying where the value comes from, which is the
+        # single most common place new users get stuck.
         api_card_body += [
-            api_id_f,
-            api_hash_f,
+            ft.Row(
+                [
+                    labelled("API ID", api_id_f,
+                             "my.telegram.org → App api_id", expand=True),
+                    labelled("API hash", api_hash_f, "128-bit hex string",
+                             expand=True),
+                ],
+                spacing=12,
+                # STRETCH so each labelled() actually fills its half. Without it
+                # the Row hands each child its intrinsic width and both fields
+                # shrink back to a fraction of the space.
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            action_buttons,
         ]
-        # Cards use the shared section() helper rather than hand-rolling the same
-        # icon+title+subtitle header four times. It also means they pick up the
-        # hairline border and explicit surface, which the elevation-only cards
-        # here were missing -- they read as one flat slab against the scaffold.
-        api_card = section("API Credentials", api_card_body,
-                           icon=ft.Icons.KEY,
-                           subtitle="Asked once, stored privately (0600).")
 
-        # Download folder moved out of Settings: it lives in the bottom bar
-        # and is editable from any tab. Keeping a second copy here meant two
-        # controls for one value, and pressing Save below would overwrite the
-        # bottom bar's change with whatever this stale field held.
+        api_card = group("Telegram account", api_card_body,
+                         icon=ft.Icons.KEY,
+                         subtitle="Required once. Stored on this machine only.",
+                         action=badge("UNSET" if first else "STORED", "accent"))
 
-        # --- Section 2: Output Mode ---
-        mode_card = section(
-            "Output Mode",
+        # --- Output mode ------------------------------------------------
+        # Both the label and the explanation are live controls held in
+        # settings_refs: the mode is chosen on the Add tab, so this group has to
+        # follow it rather than freezing whatever was set at build time.
+        mode_blurb_txt = ft.Text(MODE_BLURB[_mk], size=12.5,
+                                 color=ft.Colors.ON_SURFACE_VARIANT)
+        settings_refs["mode_blurb"] = mode_blurb_txt
+        mode_card = group(
+            "Output mode",
             [
-                ft.Container(
-                    ft.Row([
-                        ft.Icon(ft.Icons.PLAY_CIRCLE, size=22,
-                                color=ft.Colors.ON_SURFACE_VARIANT),
-                        ft.Text("Default: ", size=13,
-                                color=ft.Colors.ON_SURFACE_VARIANT),
-                        mode_txt,
-                    ], spacing=8),
-                    padding=12,
-                    border_radius=8,
-                    border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                ),
-                ft.Text("Change it on the Add tab.", size=12,
+                ft.Text(MODE_BLURB[_mk], size=12.5,
                         color=ft.Colors.ON_SURFACE_VARIANT),
+                ft.Text("If a video is already H.264/AAC it is repackaged "
+                        "without re-encoding, so all three behave the same. "
+                        "Change it per download on the Add tab.",
+                        size=11, color=ft.Colors.ON_SURFACE_VARIANT),
             ],
             icon=ft.Icons.TUNE,
-            subtitle="Default mode for new downloads.")
+            action=ft.Row([ft.Text(MODE_LABELS.get(_mk, _mk), size=12,
+                                   weight=ft.FontWeight.W_600,
+                                   color=ft.Colors.PRIMARY),
+                           badge("DEFAULT", "neutral")], spacing=8))
 
-        # --- Section 3: Actions ---
-        action_buttons = ft.Row([
-            ft.FilledButton("Save Settings", icon=ft.Icons.SAVE,
-                            on_click=on_save),
-            ft.FilledTonalButton("Login / Verify", icon=ft.Icons.LOGIN,
-                                 on_click=on_login),
-            ft.OutlinedButton("Logout", icon=ft.Icons.LOGOUT,
-                              on_click=on_logout),
-        ], spacing=12, wrap=True)
-
-        # --- Section 4: About ---
-        about_card = section(
+        # --- About ------------------------------------------------------
+        # One of the two groups that keeps a card. It holds a table of
+        # name/value rows, and a table is exactly what a border is for -- same
+        # as the Dependencies list in the reference.
+        about_card = group(
             "About",
             [
                 *_about_rows(),
-                ft.Divider(),
-                ft.Row([check_updates_btn],
-                       alignment=ft.MainAxisAlignment.START),
             ],
             icon=ft.Icons.INFO,
-            subtitle="Version, engine and updater.")
+            subtitle="Version, engine and updater.",
+            card=True,
+            action=pending_button("Check for updates", ft.Icons.UPDATE,
+                                  on_check_updates, kind="outline"))
 
-        # --- Section 5: Danger Zone ---
-        danger_zone = ft.Container(
-            ft.Column(
-                [
-                    ft.Row([
-                        ft.Icon(ft.Icons.WARNING_AMBER, size=20,
-                                color=ft.Colors.ERROR),
-                        ft.Column([
-                            ft.Text("Danger Zone", size=16,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=ft.Colors.ERROR),
-                            ft.Text("These actions are irreversible.",
-                                    size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                        ], spacing=2, expand=True),
-                    ], spacing=8),
-                    ft.Row([
-                        ft.OutlinedButton(
-                            "Reset to Defaults",
-                            icon=ft.Icons.DELETE_FOREVER,
-                            on_click=on_reset,
-                            style=ft.ButtonStyle(
-                                color=ft.Colors.ERROR,
-                            ),
-                        ),
-                    ], alignment=ft.MainAxisAlignment.START),
-                ],
-                spacing=12,
-            ),
-            padding=20,
-            border=ft.Border.all(2, ft.Colors.ERROR),
-            border_radius=12,
-            bgcolor=ft.Colors.ERROR_CONTAINER
-            if hasattr(ft.Colors, "ERROR_CONTAINER")
-            else None,
+        # --- Danger zone -------------------------------------------------
+        # Flat destructive row, not a red box. The reference has no danger zone
+        # at all, but the principle it follows applies: the button carries the
+        # colour, and a full-width tinted panel around one action gives that
+        # action more visual weight than the account fields above it.
+        danger_zone = ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER, size=14,
+                        color=ft.Colors.ERROR),
+                # Action sits on the same row as the title, so the warning and
+                # the thing that triggers it are read together instead of being
+                # separated by a paragraph.
+                ft.Column([
+                    ft.Text("Reset everything", size=12.5,
+                            weight=ft.FontWeight.W_600),
+                    ft.Text("Signs you out of Telegram, deletes your API "
+                            "credentials and empties the queue. You will be "
+                            "asked to type RESET to confirm.",
+                            size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                ], spacing=2, expand=True),
+                ui.flat_button("Reset", ft.Icons.DELETE_FOREVER,
+                               on_click=on_reset, destructive=True),
+            ],
+            spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+        # Single column. A two-column variant was tried and reverted: putting
+        # deps_view (a Column with expand=True) inside an unbounded Row/Column
+        # gives it no definite height, and the whole view collapsed to nothing.
+        # Going wide properly needs the deps view to stop expanding, which is a
+        # larger change than it looks.
         return ft.Column([
             h1(ft.Icons.SETTINGS, "Settings",
-               "Credentials, output mode, updates and environment."),
+               "Your Telegram account, output format and updates."),
             api_card,
             settings_error,
-            action_buttons,
             mode_card,
             deps_section(page),
             about_card,
             danger_zone,
-        ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+        ], spacing=26, scroll=ft.ScrollMode.AUTO, expand=True,
+           horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     # ------------------------------------------------------------ deps page
     def deps_view(page: ft.Page, header: bool = True):
         import flet as ft
-        col = ft.Column(spacing=20, scroll=ft.ScrollMode.AUTO, expand=True)
+        col = ft.Column(spacing=20, scroll=ft.ScrollMode.AUTO, expand=True,
+                      horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         sys_txt = ft.Text(f"{platform.system()} {platform.release()} • Python {platform.python_version()}",
-                          size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+                          size=11, color=ft.Colors.ON_SURFACE_VARIANT)
 
         def render(rows_data=None):
             col.controls.clear()
@@ -1960,7 +2371,11 @@ def run_gui(port=None, view=None):
             if header:
                 col.controls.append(h1(ft.Icons.BUILD, "Dependencies",
                                        "Engine status for download + convert."))
-            col.controls.append(sys_txt)
+                # Only on the standalone page. Emitted unconditionally it landed
+                # between two Settings cards with no heading, reading as a stray
+                # line of text rather than part of anything. The platform and
+                # Python version are both in the About card already.
+                col.controls.append(sys_txt)
             if rows_data is None:
                 # First build happens before the view is shown, so the sync
                 # subprocess probes here are acceptable. Repeated checks go
@@ -1968,49 +2383,69 @@ def run_gui(port=None, view=None):
                 rows_data = deps_mod.check_all()
             rows: list = []
             for d in rows_data:
-                rows.append(ft.Row([
-                    ft.Icon(ft.Icons.CHECK_CIRCLE if d.ok else ft.Icons.ERROR, size=20,
-                            color=ft.Colors.GREEN if d.ok else ft.Colors.ERROR),
-                    ft.Column([ft.Text(d.name, size=14, weight=ft.FontWeight.W_500),
-                               ft.Text(d.version or d.hint, size=12,
-                                       color=ft.Colors.ON_SURFACE_VARIANT)],
-                              spacing=2, expand=True),
-                    ft.Text("OK" if d.ok else "MISSING", size=12, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.GREEN if d.ok else ft.Colors.ERROR),
-                ], spacing=12))
+                # One row per dependency: icon, name, hint underneath, version
+                # pushed right in mono, and a status chip. The generated design
+                # scans because the version column is right-aligned in
+                # monospace, so every value lines up regardless of length.
+                row = ft.Container(
+                    ft.Row([
+                        ft.Icon(ft.Icons.CHECK_CIRCLE if d.ok
+                                else ft.Icons.ERROR_OUTLINE,
+                                size=14,
+                                color=STATUS_COLORS["done"] if d.ok
+                                else STATUS_COLORS["error"]),
+                        ft.Column([
+                            ft.Text(d.name, size=12, weight=ft.FontWeight.W_500),
+                            ft.Text(d.hint or "", size=11,
+                                    color=ft.Colors.ON_SURFACE_VARIANT),
+                        ], spacing=1, expand=True),
+                        mono(d.version or "not detected", size=11,
+                             color=ft.Colors.ON_SURFACE_VARIANT),
+                        badge("OK" if d.ok else "MISSING",
+                              "ok" if d.ok else "bad"),
+                    ], spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=ft.Padding(10, 8, 10, 8),
+                    border_radius=6)
+                rows.append(row)
                 if not d.ok:
-                    rows.append(ft.Container(
-                        ft.Row([
-                            ft.Icon(ft.Icons.TERMINAL, size=16,
-                                    color=ft.Colors.ON_ERROR_CONTAINER),
-                            ft.Text(install_cmd_for(d), size=12, selectable=True,
-                                    expand=True,
-                                    color=ft.Colors.ON_ERROR_CONTAINER),
-                        ], spacing=8),
-                        bgcolor=ft.Colors.ERROR_CONTAINER,
-                        border_radius=8, padding=12))
+                    # The command is the whole point of a MISSING row, so it
+                    # gets its own line with a $ prompt and a Copy button --
+                    # users retype these and get them subtly wrong otherwise.
+                    rows.append(ft.Row([
+                        ft.Text("$", size=11, font_family="monospace",
+                                color=ft.Colors.ON_SURFACE_VARIANT),
+                        mono(install_cmd_for(d), size=11,
+                             color=ft.Colors.ON_SURFACE_VARIANT),
+                        ft.Container(expand=True),
+                        ft.TextButton(
+                            "Copy",
+                            icon=ft.Icons.CONTENT_COPY_OUTLINED,
+                            on_click=lambda e, _c=install_cmd_for(d):
+                                _copy_clipboard(page, _c),
+                            style=ft.ButtonStyle(
+                                text_style=ft.TextStyle(size=11))),
+                    ], spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER))
             async def _recheck(e):
                 # check_all spawns subprocesses (ffprobe -version, etc.):
                 # offload to a thread so repeated checks never freeze the UI.
-                btn = e.control
-                btn.disabled = True
-                btn.text = "Checking…"
-                page.update()
+                # No manual disabled/"Checking…" bookkeeping here -- the button
+                # is built by pending_button, which owns that state, exactly as
+                # it does for Save, Verify and Check for updates.
                 try:
                     data = await asyncio.to_thread(deps_mod.check_all)
                     render(data)
                 except Exception as exc:
                     snack(page, f"Dependency check failed: {exc}", error=True)
-                finally:
-                    btn.disabled = False
-                    btn.text = "Re-check"
-                    page.update()
 
-            rows.append(ft.Row([ft.FilledTonalButton("Re-check", icon=ft.Icons.REFRESH,
-                                                     on_click=_recheck)],
+            rows.append(ft.Row([pending_button("Re-check", ft.Icons.REFRESH,
+                                              _recheck)],
                                alignment=ft.MainAxisAlignment.START))
-            col.controls.append(section("Status", rows, icon=ft.Icons.CHECKLIST,
-                                        subtitle="Required tools for download + convert."))
+            col.controls.append(group(
+                "Dependencies", rows, icon=ft.Icons.CHECKLIST,
+                subtitle="Required tools for download and convert.",
+                card=True))
             try:
                 page.update()
             except Exception:
@@ -2293,6 +2728,55 @@ def run_gui(port=None, view=None):
         state.pop("me_id", None)
         return True
 
+    async def typed_confirm_dialog(page, title: str, body: str,
+                                   phrase: str, action: str,
+                                   icon=ft.Icons.WARNING_AMBER) -> bool:
+        """Destructive confirmation the user must complete by typing *phrase*.
+
+        A plain "are you sure?" is one stray click away from deleting a saved
+        Telegram session and the whole queue, and the reset button sits right
+        under ordinary settings controls where a mis-click is likely. Typing a
+        word forces a deliberate act.
+
+        The confirm button stays disabled until the text matches exactly, so it
+        cannot be dismissed by reflex.
+        """
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        entry = ft.TextField(hint_text=phrase, autofocus=True,
+                             border_color=ft.Colors.OUTLINE_VARIANT,
+                             border_radius=8, dense=True)
+        ok = ft.FilledButton(action, color=ft.Colors.ERROR,
+                             disabled=True)
+
+        def _close(result):
+            if not fut.done():
+                fut.set_result(result)
+            _hide_dlg(page, dlg)
+
+        def _on_type(e):
+            ok.disabled = (e.control.value or "").strip() != phrase
+            try:
+                ok.update()
+            except Exception:
+                pass
+
+        entry.on_change = _on_type
+        ok.on_click = lambda e: _close(True)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text(title), icon=ft.Icon(icon),
+            content=ft.Column([
+                ft.Text(body, size=12),
+                ft.Text(f"Type {phrase} to confirm:", size=11,
+                        color=ft.Colors.ON_SURFACE_VARIANT),
+                entry,
+            ], spacing=10, tight=True),
+            actions=[ft.TextButton("Cancel", on_click=lambda e: _close(False)),
+                     ok],
+        )
+        _show_dlg(page, dlg)
+        return bool(await fut)
+
     async def confirm_dialog(page, title: str, body: str,
                              action: str = "Download",
                              icon=ft.Icons.DOWNLOAD) -> bool:
@@ -2332,72 +2816,17 @@ def run_gui(port=None, view=None):
 
     # ------------------------------------------------------------ shell
     async def _main(page: ft.Page):
+        nonlocal _main_page
+        _main_page = page
         page.title = "Telegram Downloader"
-        # Rich theme overrides with custom backgrounds for dark/light modes
-        dark_theme = ft.Theme(
-            color_scheme_seed=SEED,
-            scaffold_bgcolor=DARK_BG,
-            # Achromatic by design. Every role below is a grey, so hierarchy
-            # comes from lightness rather than hue. The two exceptions are
-            # `tertiary` (emerald, used for "done") and `error` (red), which
-            # must stay distinguishable because they carry meaning. `secondary`
-            # matters more than it looks: Flet paints the NavigationRail
-            # selected pill and some filled buttons with it, so a coloured
-            # secondary puts that hue on every tab the user selects.
-            color_scheme=ft.ColorScheme(
-                primary="#D7DBE4",
-                on_primary="#0F1117",
-                primary_container="#2A2F3A",
-                on_primary_container="#E6E8EF",
-                secondary="#9AA0AE",
-                on_secondary="#0F1117",
-                secondary_container="#252935",
-                on_secondary_container="#D7DBE4",
-                tertiary=STATUS_COLORS["done"],
-                on_tertiary="#0F1117",
-                tertiary_container="#0C3A2A",
-                on_tertiary_container="#A7F3D0",
-                error=STATUS_COLORS["error"],
-                on_error="#0F1117",
-                error_container="#4C1D1D",
-                on_error_container="#FECACA",
-                surface=DARK_SURFACE,
-                on_surface="#E6E8EF",
-                surface_container_high="#1F2330",
-                # Was #B0B0C0 against a #2D2D4A surface -- roughly 4:1, and
-                # it is used for every subtitle and hint, so the whole secondary
-                # layer was too dim. Lightened for readable contrast.
-                on_surface_variant="#A8AEC2",
-                outline="#2E3342",
-            ),
-        )
-        light_theme = ft.Theme(
-            color_scheme_seed=SEED,
-            scaffold_bgcolor=LIGHT_BG,
-            color_scheme=ft.ColorScheme(
-                primary="#3A3F4B",
-                on_primary="#FFFFFF",
-                primary_container="#E2E5EC",
-                on_primary_container="#1A1D26",
-                secondary="#6B7280",
-                on_secondary="#FFFFFF",
-                secondary_container="#E8EAEF",
-                on_secondary_container="#1A1D26",
-                tertiary="#047857",
-                on_tertiary="#FFFFFF",
-                tertiary_container="#D1FAE5",
-                on_tertiary_container="#065F46",
-                error="#DC2626",
-                on_error="#FFFFFF",
-                error_container="#FEE2E2",
-                on_error_container="#991B1B",
-                surface=LIGHT_SURFACE,
-                on_surface="#14161D",
-                surface_container_high="#EFEFF3",
-                on_surface_variant="#545A6B",
-                outline="#C9CBD4",
-            ),
-        )
+        # Theme comes from ui.theme(). The navy/Telegram token set lives in
+        # ui.py, which is the single source of truth for colour; this file used
+        # to carry its own PALETTES dict plus a hand-built ColorScheme, which is
+        # how the amber and blue-slate schemes drifted out of step with each
+        # other. The scrollbar theme is set inside ui.theme() too.
+        dark_theme = ui.theme(dark=True)
+        light_theme = ui.theme(dark=False)
+
         page.theme = light_theme
         page.dark_theme = dark_theme
         page.padding = 0
@@ -2426,12 +2855,8 @@ def run_gui(port=None, view=None):
             icon=ft.Icons.LIGHT_MODE,
             tooltip="Switch to light mode",
             on_click=_toggle_theme,
-            icon_size=20,
-            # Sits on the blue app bar, so it takes the bar's ink rather than
-            # the scheme's ON_PRIMARY (which is near-black on the grey primary
-            # and would have been invisible here anyway). IconButton spells it
-            # icon_color, not color.
-            icon_color=APPBAR_FG,
+            icon_size=18,
+            icon_color=ft.Colors.ON_SURFACE_VARIANT,
         )
         # Sync initial icon with current theme
         _st0_icon = load_settings()
@@ -2439,67 +2864,50 @@ def run_gui(port=None, view=None):
             theme_btn.icon = ft.Icons.DARK_MODE
             theme_btn.tooltip = "Switch to dark mode"
 
-        # -- AppBar --------------------------------------------------------
-        # Explicit APPBAR_BG/FG rather than PRIMARY/ON_PRIMARY: PRIMARY is the
-        # achromatic scheme colour, so using it here is what made the title bar
-        # white.
+        # -- Brand mark ------------------------------------------------------
+        # The APP's logo, not the Telegram paper plane. assets/icon.svg ships
+        # inside the package, so the title bar shows the real artwork in every
+        # install. Loaded as a self-contained data URI (see app_logo_src)
+        # because ft.app() here accepts no assets_dir to serve the file from.
+        # If the asset cannot be read, fall back to a drawn square + download
+        # arrow -- a broken image box is worse than a close copy.
         #
-        # The mark is the APP's logo, not the Telegram paper plane.
-        # assets/icon.svg ships inside the package, so the title bar
-        # shows the real artwork in every install. It is loaded as a
-        # self-contained data URI (see app_logo_src) because ft.app()
-        # here accepts no assets_dir to serve the file from. If the
-        # asset cannot be read for any reason, fall back to a drawn
-        # square + download arrow that matches the SVG -- a broken
-        # image box is worse than a close copy.
+        # The bar itself is built further down, after the nav chips exist, so
+        # that brand + tabs + toggle all end up in ONE row instead of the two
+        # stacked full-width bars this replaced.
         logo_src = app_logo_src()
         if logo_src is not None:
             app_logo = ft.Image(
-                src=logo_src, width=24, height=24,
+                src=logo_src, width=20, height=20,
                 fit=ft.BoxFit.CONTAIN,
             )
         else:
             app_logo = ft.Container(
-                width=24, height=24,
-                border_radius=0,      # square, not a lozenge
-                bgcolor=APPBAR_FG,
+                width=20, height=20,
+                border_radius=0,
+                bgcolor="#2AABEE",
                 alignment=ft.Alignment.CENTER,
                 padding=0,
-                content=ft.Icon(ft.Icons.DOWNLOAD, color=APPBAR_BG, size=17),
+                content=ft.Icon(ft.Icons.DOWNLOAD, color="#0F1117", size=13),
             )
-        app_bar = ft.AppBar(
-            leading=ft.Container(
-                app_logo, width=24, height=24,
-                alignment=ft.Alignment.CENTER,
-                padding=0, margin=ft.Margin(left=10),
-            ),
-            leading_width=44,
-            title=ft.Text(
-                "Telegram Downloader",
-                size=14,
-                weight=ft.FontWeight.W_600,
-                color=APPBAR_FG,
-            ),
-            center_title=False,
-            bgcolor=APPBAR_BG,
-            color=APPBAR_FG,
-            elevation=0,
-            actions=[theme_btn],
-        )
 
         # -- Body container ------------------------------------------------
-        # Centred, width-capped shell. Previously the body stretched edge to
-        # edge, so on a 1280px window every form field ran the full width and
-        # ~60% of the screen was dead space. max_width keeps line length
-        # readable and puts the content on a predictable left margin.
+        # The scroll container owns scrolling; each view is a plain Column
+        # inside it. Previously every view was its own scrollable Column nested
+        # in a capped box, which is how content ended up a narrow slab in the
+        # middle of the window with the nav pinned far to the left.
+        #
+        # No width cap: the content fills the window and only the gutter
+        # constrains it, so the screen is actually used. `expand` on BOTH
+        # containers matters -- with it only on the outer one the inner box
+        # sized itself to its content and overflowed instead of scrolling, so
+        # everything below the fold was unreachable.
         body_content = ft.Container(expand=True)
         body = ft.Container(
             content=ft.Container(
                 content=body_content,
-                width=860,
                 expand=True,
-                margin=ft.Margin(0, 0, 0, 0),
-                padding=ft.Padding(32, 32, 32, 32),
+                padding=ft.Padding(SHELL_PAD, 16, SHELL_PAD, 16),
             ),
             expand=True,
             alignment=ft.Alignment.TOP_CENTER,
@@ -2527,39 +2935,65 @@ def run_gui(port=None, view=None):
         _tab_chips: list = []
 
         def _make_chip(idx: int, label: str, icon):
+            """A tab with a 3px accent underline, not a filled pill.
+
+            From simple-yt-downloader's style.py:
+                stackswitcher > button { border-bottom: 3px solid transparent }
+                stackswitcher > button:checked { border-bottom: 3px solid @accent;
+                                                 color: @accent; font-weight: 600 }
+
+            The filled-chip version made three saturated blocks sit in the top
+            bar competing with the content; an underline is a 3px mark that
+            says "you are here" without adding a box.
+            """
             def _pick(e):
                 _goto(idx)
-            chip = ft.Container(
-                content=ft.Row(
-                    [
-                        ft.Icon(icon, size=18),
-                        ft.Text(label, size=14, weight=ft.FontWeight.W_600),
-                    ],
-                    spacing=8,
-                    tight=True,
-                ),
-                padding=ft.Padding(14, 9, 14, 9),
-                border_radius=10,
+            tab = ft.Container(
+                content=ft.Text(label, size=13, weight=ft.FontWeight.W_600,
+                                color=ft.Colors.ON_SURFACE_VARIANT),
+                padding=ft.Padding(10, 8, 10, 8),
+                # bottom edge only; transparent when unselected so nothing shows
+                border=ft.Border.only(bottom=ft.BorderSide(3,
+                                                           ft.Colors.TRANSPARENT)),
                 on_click=_pick,
-                # Identity is carried on the chip, not implied by its position in
+                # Identity is carried on the tab, not implied by its position in
                 # _tab_chips. queue_chip is built FIRST (refresh_queue needs a
                 # handle on it) but renders SECOND, so enumerate() order is
                 # [Queue, Add, Settings] while the screen shows
                 # [Add, Queue, Settings] -- clicking Add lit up Queue.
                 data=idx,
             )
-            _tab_chips.append(chip)
-            return chip
+            _tab_chips.append(tab)
+            return tab
 
         queue_chip = _make_chip(1, "Queue", ft.Icons.QUEUE_OUTLINED)
-        tab_bar = ft.Row(
-            [
-                _make_chip(0, "Add", ft.Icons.LINK_OUTLINED),
-                queue_chip,
-                _make_chip(2, "Settings", ft.Icons.SETTINGS_OUTLINED),
-            ],
-            spacing=8,
-            tight=True,
+        _add_chip = _make_chip(0, "Add", ft.Icons.LINK_OUTLINED)
+        _settings_chip = _make_chip(2, "Settings", ft.Icons.SETTINGS_OUTLINED)
+
+        # ONE top bar: brand, underlined tabs, theme toggle.
+        #
+        # This replaces a full-bleed #2AABEE AppBar stacked above a second
+        # full-bleed tab strip. Two bars, a saturated accent used as a
+        # background, and a third alignment axis for the centred body below --
+        # that stack is why the app read as a government form. Brand, tabs and
+        # toggle belong on one line; colour now means status, not chrome.
+        top_bar = _bar(
+            ft.Row(
+                [
+                    app_logo,
+                    ft.Text("Telegram Downloader", size=13,
+                            weight=ft.FontWeight.W_600),
+                    ft.Container(width=16),   # gap between brand and tabs
+                    _add_chip, queue_chip, _settings_chip,
+                    ft.Container(expand=True),   # pushes toggle to the right
+                    theme_btn,
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=ft.Colors.SURFACE,
+            bottom_border=True,
+            pad_y=4,
         )
 
         # Expose the Queue chip so refresh_queue can put the pending count on it.
@@ -2568,29 +3002,20 @@ def run_gui(port=None, view=None):
         _current_idx = -1
 
         def _set_selected_index(idx: int):
-            # Selected chip reads as a filled surface; the rest stay flat.
-            # Matched on chip.data, never enumerate order -- see _make_chip.
+            # Selection is an accent underline plus accent label text. Matched on
+            # chip.data, never enumerate order -- see _make_chip.
             #
-            # animate_opacity is NOT used here on purpose: it is the cheapest
-            # property to composite, but it only fades the WHOLE chip, so an
-            # unselected chip would briefly ghost at partial opacity instead of
-            # going cleanly flat. bgcolor/border are painted every frame either
-            # way at this size (3 chips), so the cost is irrelevant and the
-            # direct property change is the honest one. Duration is short on
-            # purpose: this is a selection indicator, not a transition the user
-            # should wait out.
+            # No animation on purpose: this is a 3px border and a colour change
+            # on three small controls. The old version animated opacity, which
+            # faded the WHOLE tab so an unselected one ghosted at partial alpha
+            # instead of going cleanly flat.
             for chip in _tab_chips:
                 on = (chip.data == idx)
-                chip.bgcolor = (ft.Colors.SECONDARY_CONTAINER if on
-                                else ft.Colors.TRANSPARENT)
-                chip.content.controls[0].color = (ft.Colors.ON_SECONDARY_CONTAINER
-                                                  if on
-                                                  else ft.Colors.ON_SURFACE_VARIANT)
-                chip.content.controls[1].color = (ft.Colors.ON_SECONDARY_CONTAINER
-                                                  if on
-                                                  else ft.Colors.ON_SURFACE_VARIANT)
-                chip.border = (ft.Border.all(1, ft.Colors.OUTLINE) if on
-                               else ft.Border.all(1, ft.Colors.TRANSPARENT))
+                chip.border = ft.Border.only(
+                    bottom=ft.BorderSide(3, ft.Colors.PRIMARY if on
+                                         else ft.Colors.TRANSPARENT))
+                chip.content.color = (ft.Colors.PRIMARY if on
+                                      else ft.Colors.ON_SURFACE_VARIANT)
 
         def on_nav(idx: int):
             # `nonlocal` is required, not decorative. Assigning _current_idx
@@ -2645,7 +3070,7 @@ def run_gui(port=None, view=None):
         # only editable inside Settings, so changing where downloads land
         # meant navigating to Settings first -- and the field most likely to
         # need changing is the one furthest from view.
-        dl_path_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
+        dl_path_txt = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT,
                               expand=True, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)
 
         def _current_dl_label() -> str:
@@ -2689,23 +3114,55 @@ def run_gui(port=None, view=None):
             except Exception:
                 pass
 
-        dl_bar = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.FOLDER_OUTLINED, size=18,
-                            color=ft.Colors.ON_SURFACE_VARIANT),
-                    dl_path_txt,
-                    ft.TextButton("Change", on_click=_pick_download_dir),
-                ],
-                spacing=10,
+        # Download location, pinned to the bottom and editable from any tab.
+        #
+        # A slim CARD, not a full-width bar. From the reference:
+        #     .download-row.path-bar { padding: 8px 10px; }
+        # It is the one non-list item that earns a card, because it is a
+        # persistent object the user acts on rather than a section heading.
+        # Previously this ran edge-to-edge as a bar while the body was inset,
+        # which put the folder path hard against the window and Change hard
+        # against the other side.
+        dl_bar = _bar(
+            ui.card(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.FOLDER_OUTLINED, size=14,
+                                color=ft.Colors.ON_SURFACE_VARIANT),
+                        dl_path_txt,
+                        ft.Container(expand=True),
+                        # Reveal the folder in the desktop file manager. This
+                        # lived in a "Quick Actions" card on the Add tab, which
+                        # gave two buttons -- one of them duplicating the tab
+                        # strip -- a full bordered panel. Next to the path they
+                        # actually refer to, it costs one 28px button.
+                        ui.icon_button(ft.Icons.OPEN_IN_NEW,
+                                       "Open download folder",
+                                       lambda e: open_folder(page)),
+                        ft.Container(
+                            content=ft.Text("Change", size=12,
+                                            color=ft.Colors.ON_SURFACE),
+                            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                            border_radius=7,
+                            padding=ft.Padding(12, 6, 12, 6),
+                            on_click=_pick_download_dir,
+                            ink=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                pad=8,
             ),
-            padding=ft.Padding(16, 8, 16, 8),
-            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+            bgcolor=ft.Colors.SURFACE,
+            top_border=True,
+            pad_y=8,
         )
         _refresh_dl_label()
 
-        # -- Page shell: AppBar + layout -----------------------------------
-        page.appbar = app_bar
+        # -- Page shell: top bar, body, footer ------------------------------
+        # No page.appbar any more: the brand, the tabs and the toggle are all
+        # rows inside top_bar, so there is one header instead of two.
 
         # First-run nudge: open Settings when API/folder missing.
         st0 = load_settings()
@@ -2714,16 +3171,41 @@ def run_gui(port=None, view=None):
         body_content.content = views[start_idx]
         _apply_layout()
 
-        # Tabs on top, download location at the bottom, content between.
         page.add(ft.Column(
             [
-                ft.Container(tab_bar, padding=ft.Padding(32, 12, 32, 4)),
+                top_bar,
                 body,
                 dl_bar,
             ],
             expand=True,
             spacing=0,
         ))
+
+        # -- First run: required-dependency prompt ------------------------
+        # The app used to launch straight into a half-working state and only
+        # reveal a missing dependency once a download failed with some
+        # unrelated-looking error. A missing REQUIRED package is a hard stop,
+        # so say so at launch, by name, with the command to fix it.
+        async def _first_run_dep_check():
+            try:
+                missing = await asyncio.to_thread(deps_mod.missing_required)
+            except Exception:
+                return          # never let the check itself break startup
+            if not missing:
+                return
+            names = "\n".join(f"  •  {d.name}" for d in missing)
+            cmds = "\n".join({install_cmd_for(d) for d in missing} - {""})
+            body = (f"This app cannot download until these are installed:\n\n"
+                    f"{names}\n\n"
+                    f"Install with:\n{cmds}\n\n"
+                    "Settings → Status has the same list and a Re-check button.")
+            go = await confirm_dialog(
+                page, "Missing dependencies", body,
+                action="Open Settings", icon=ft.Icons.WARNING_AMBER)
+            if go:
+                _goto(2)
+
+        page.run_task(_first_run_dep_check)
 
     import flet as ft
     # `view` exists so the GUI can be served over HTTP on a headless machine

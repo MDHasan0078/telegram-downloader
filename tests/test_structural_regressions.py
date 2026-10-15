@@ -73,7 +73,10 @@ def test_gui_nav_destinations_match_the_views_list():
     # Navigation is a top row of chips built from primitives. flet 0.86.5's
     # own tab controls cannot be driven the way _goto() needs, so the chip
     # count is what keeps navigation aligned with `views`.
-    chips = re.findall(r"^\s+(?:queue_chip = )?_make_chip\((\d+), \"(\w+)\"",
+    # The chip-into-view alignment is what matters, so match ANY variable name
+    # being assigned a chip. Hardcoding "queue_chip =" only made this test
+    # break when a chip was renamed, which is not the invariant worth pinning.
+    chips = re.findall(r"^\s+(?:\w+ = )?_make_chip\((\d+), \"(\w+)\"",
                        src, re.M)
     # Compare by index, not source order: `queue_chip` is hoisted out of the Row
     # so refresh_queue() can reach it, so it appears first in the source.
@@ -121,7 +124,7 @@ def test_tab_chips_are_keyed_by_index_not_construction_order():
 
     # Construction order really does differ from visual order -- that is the
     # whole reason position-based matching was wrong.
-    builds = re.findall(r'^\s+(?:queue_chip = )?_make_chip\((\d+), "(\w+)"',
+    builds = re.findall(r'^\s+(?:\w+ = )?_make_chip\((\d+), "(\w+)"',
                         src, re.M)
     order = [int(i) for i, _ in builds]
     assert order != [0, 1, 2], (
@@ -162,8 +165,11 @@ def test_download_location_is_reachable_from_the_window_chrome():
     src = (SRC / "gui.py").read_text(encoding="utf-8")
     assert "_pick_download_dir" in src, "no download-folder picker is wired up"
     assert "dl_bar" in src, "no bottom download-location bar"
+    # Slice up to the assignment regardless of which builder constructs it
+    # (it is _bar(...) now, not ft.Container(...)); the invariant is the
+    # validation, not the widget class.
     body = src[src.index("async def _pick_download_dir"):
-               src.index("dl_bar = ft.Container")]
+               src.index("dl_bar = ")]
     assert "ensure_download_dir(st)" in body, (
         "the picker must validate the folder before saving it")
     assert "get_directory_path" in body, "must use a real folder picker"
@@ -253,3 +259,151 @@ def test_signature_verification_still_precedes_download():
     assert payload != -1, "download_asset no longer downloads anything"
     assert verified < payload, (
         "download_asset fetches the payload before verifying the manifest")
+
+# ---------------------------------------------------------------------------
+# Flet layout traps that fail SILENTLY.
+#
+# Both of these render as "a correct-height blank band" rather than raising, so
+# nothing in the normal test run and nothing in the server log reveals them.
+# They were found by screenshotting the running app, which is exactly why they
+# are pinned here now.
+# ---------------------------------------------------------------------------
+
+GUI_PY = SRC / "gui.py"
+
+
+def _flet_call_name(node):
+    """'ft.Column' / 'ft.TextField' / 'TextField' -> the trailing name."""
+    if not isinstance(node, ast.Call):
+        return None
+    f = node.func
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    if isinstance(f, ast.Name):
+        return f.id
+    return None
+
+
+def test_no_textfield_expands_under_an_unbounded_height_column():
+    """A TextField with expand=True is only legal under a ListView.
+
+    This is the precise rule behind two silent failures found by screenshotting
+    the running app.
+
+    A scrolling ft.Column hands its children UNBOUNDED height. An Expanded child
+    under unbounded height cannot be laid out, so Flutter drops the subtree: the
+    field, and everything sharing its Row, render nothing -- while the parent
+    still reserves their correct height. The only symptom is a blank band where
+    a control should be, with no exception anywhere.
+
+      - The Add tab's URL box did this: the field and all three of its buttons
+        vanished, leaving a ~157px gap under the page title.
+      - The Settings download-folder field did the same further down the page.
+
+    Under a ft.ListView the height IS bounded, so expand=True is correct there
+    and is used deliberately (the preview title fields). The rule is about the
+    ancestor's constraint, not about the property being wrong on its own.
+
+    Confirmed with a minimal repro: the identical tree renders with expand
+    removed and renders nothing, at the same height, with expand set.
+    """
+    tree = ast.parse(GUI_PY.read_text(encoding="utf-8"))
+    parent = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def kwarg(call, name):
+        for kw in call.keywords:
+            if kw.arg == name:
+                return kw.value
+        return None
+
+    def scrolls_unbounded(node):
+        """True if node is a Column that scrolls -> unbounded child height."""
+        name = _flet_call_name(node)
+        if name != "Column":
+            return False
+        sc = kwarg(node, "scroll")
+        return sc is not None and not (isinstance(sc, ast.Constant)
+                                       and sc.value is None)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if _flet_call_name(node) != "TextField":
+            continue
+        exp = kwarg(node, "expand")
+        if exp is None or (isinstance(exp, ast.Constant)
+                           and exp.value is False):
+            continue
+        cur, chain = parent.get(node), []
+        while cur is not None:
+            chain.append(_flet_call_name(cur))
+            cur = parent.get(cur)
+        if any(scrolls_unbounded(c) for c in chain
+               if isinstance(c, ast.Call)):
+            offenders.append((node.lineno, "under a scrolling ft.Column"))
+    assert not offenders, (
+        f"ft.TextField(expand=...) {offenders}. Under a scrolling Column the "
+        "height is unbounded, so Flutter renders nothing at all. Use "
+        "min_lines/max_lines, and let the parent stretch it instead.")
+
+
+def test_grow_helper_exists_and_sets_expand():
+    """_grow() must exist, and it must be what marks a Row child as expanding.
+
+    A Row child that neither expands nor sets an explicit width is laid out at
+    ZERO width, while the Row still reserves its correct height. On the Add tab
+    that made the URL field and all three of its buttons disappear, leaving a
+    ~157px blank band -- a silent failure, not an error.
+
+    Asserting on the helper rather than on a variable name is deliberate: three
+    tests in this file were previously pinned to `queue_chip = ` and
+    `dl_bar = ft.Container` and broke on an unrelated rename.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "def _grow(" in text, (
+        "_grow() is gone. A Row child with neither expand nor an explicit width "
+        "collapses to zero width and renders nothing.")
+    assert "control.expand = flex" in text, (
+        "_grow() exists but no longer sets expand; it is now a no-op.")
+    assert len(re.findall(r"\b_grow\(", text)) >= 2, (
+        "_grow() is defined but never called; the Row-children regression is "
+        "back.")
+
+
+def test_theme_comes_from_the_ui_module_not_inline_colours():
+    """Colour lives in ui.py; gui.py must not hand-build a theme.
+
+    Two palettes drifted apart while both existed -- an amber scheme in a local
+    PALETTES dict and a blue-slate ColorScheme beside it -- which is how the app
+    ended up with an accent that matched nothing. ui.py is the single source.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "from . import ui" in text, "gui.py no longer imports the ui module"
+    assert "ui.theme(dark=True)" in text and "ui.theme(dark=False)" in text, (
+        "gui.py is not building both themes through ui.theme()")
+    assert "PALETTES" not in text.replace(
+        "to carry its own PALETTES dict plus a hand-built ColorScheme", ""
+    ), ("a PALETTES dict is back in gui.py; colour must have one home")
+
+
+def test_cards_are_only_for_list_items_and_named_cards():
+    """section() must be gone and group() must be bare unless asked.
+
+    Wrapping every Settings group in its own bordered card was the reason the
+    GUI read as broken: three or four full-width boxes of equal weight, each
+    with its own title and hairline, so nothing had a clear primary area. The
+    reference allows cards only for list rows and the path bar.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "def section(" not in text, (
+        "section() is back; it is the card-soup helper that was replaced by "
+        "group().")
+    assert "def group(" in text
+    # group() must return a bare Column unless card=True
+    m = re.search(r"def group\(.*?\n    def ", text, re.S)
+    assert m, "could not locate group()"
+    body = m.group(0)
+    assert "if not card:" in body and "return col" in body, (
+        "group() is not bare by default")
