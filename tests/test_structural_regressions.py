@@ -10,6 +10,7 @@ is invisible: the code parses, the module imports, and the tests are green.
 """
 import ast
 import base64
+import builtins
 import pathlib
 import re
 
@@ -407,3 +408,106 @@ def test_cards_are_only_for_list_items_and_named_cards():
     body = m.group(0)
     assert "if not card:" in body and "return col" in body, (
         "group() is not bare by default")
+
+
+def _own_scope_bindings(fn):
+    """Names bound in fn's own scope, NOT descending into nested scopes."""
+    out = set()
+
+    def collect(node):
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    out.add((a.asname or a.name).split(".")[0])
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                out.add(n.id)
+            elif isinstance(n, ast.arg):
+                out.add(n.arg)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                out.add(n.name)
+            stack.extend(ast.iter_child_nodes(n))
+
+    for stmt in fn.body:
+        collect(stmt)
+    return out
+
+
+def _names_loaded_in(fn):
+    loaded = set()
+    stack = [fn]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            loaded.add(n.id)
+        stack.extend(ast.iter_child_nodes(n))
+    return loaded
+
+
+def test_refresh_queue_does_not_touch_queue_view_locals():
+    """refresh_queue() must not reference a name bound only in queue_view().
+
+    The two are siblings inside run_gui, so Python resolves refresh_queue's
+    free names against run_gui's scope -- anything defined inside queue_view is
+    invisible to it and raises NameError at runtime.
+
+    That is not hypothetical. refresh_queue() contained `header.value = ...`
+    for an empty queue; `header` is a queue_view local. It never fired only
+    because the function used to bail out at the top on every call. Fixing that
+    (the queue genuinely never repopulated, see the _main_page change) turned
+    dead code into a crash on every empty-queue refresh:
+
+        NameError: name 'header' is not defined
+
+    The count does not need a queue_view local: it is set above, from the
+    shared queue_header_txt["ctrl"] handle.
+    """
+    tree = ast.parse(GUI_PY.read_text(encoding="utf-8"))
+    fns = {n.name: n for n in ast.walk(tree)
+           if isinstance(n, ast.FunctionDef)
+           and n.name in ("refresh_queue", "queue_view", "run_gui")}
+    assert set(fns) == {"refresh_queue", "queue_view", "run_gui"}, sorted(fns)
+
+    run_own = _own_scope_bindings(fns["run_gui"])
+    leaked = sorted((_own_scope_bindings(fns["queue_view"])
+                     & _names_loaded_in(fns["refresh_queue"]))
+                    - run_own - set(dir(builtins)))
+    assert not leaked, (
+        f"refresh_queue() references {leaked}, which is bound only inside "
+        "queue_view(). The two are siblings under run_gui, so this is a "
+        "NameError at runtime -- it just stays hidden while the line is on a "
+        "path nothing takes.")
+
+
+def test_the_shared_header_handle_is_what_updates_the_count():
+    """The Queue count must go through queue_header_txt, not a local Text.
+
+    Checked on the AST rather than as a substring: a prose comment that *names*
+    the bug is worth keeping, and a text search cannot tell an assignment from
+    a sentence about one.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert 'queue_header_txt["ctrl"]' in text, (
+        "refresh_queue() no longer updates the header through the shared "
+        "queue_header_txt handle")
+
+    tree = ast.parse(text)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "refresh_queue")
+    targets = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if (isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)):
+                    targets.add(t.value.id)
+        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute):
+            targets.add(n.target.value.id)
+    assert "header" not in targets, (
+        "refresh_queue() assigns to `header`, which is a queue_view local and "
+        "is not visible from here -> NameError on every empty-queue refresh.")

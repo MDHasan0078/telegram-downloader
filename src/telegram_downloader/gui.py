@@ -1549,7 +1549,15 @@ def run_gui(port=None, view=None):
         if not items:
             if not _queue_empty_shown:
                 queue_list.controls.clear()
-                header.value = "Downloads (0)"
+                # No `header.value = ...` here. `header` is a local of
+                # queue_view(), so refresh_queue() cannot see it -- and it did
+                # not need to: the count is already set above, from the header
+                # handle that IS shared, via queue_header_txt["ctrl"]. The line
+                # raised NameError("name 'header' is not defined").
+                #
+                # It only ever ran because the page guard above used to bail
+                # out first, so the whole branch was dead code. Fixing the guard
+                # (the queue genuinely never populated before) exposed it.
                 _queue_empty_shown = True
                 try:
                     page.update()
