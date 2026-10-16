@@ -1,1 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="4" y="4" width="56" height="56" rx="0" fill="#2AABEE"/><path d="M32 16v20m0 0 8-8m-8 8-8-8" fill="none" stroke="#0F1117" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M21 43v5a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2v-5" fill="none" stroke="#0F1117" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Telegram Downloader">
+  <defs>
+    <linearGradient id="tile" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4FC3F7"/>
+      <stop offset=".55" stop-color="#2AABEE"/>
+      <stop offset="1" stop-color="#1573B0"/>
+    </linearGradient>
+    <linearGradient id="plane" x1="18" y1="18" x2="46" y2="46" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E4F4FD"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile. Rounded, gently lit from the top-left. The old mark was a hard
+       64x64 square (rx=0) with a generic download arrow, which read as a
+       clipboard icon rather than as Telegram. -->
+  <rect width="64" height="64" rx="16" fill="url(#tile)"/>
+
+  <!-- Paper plane. Two faces: the lit upper face and the shaded fold, which is
+       what makes it read as a solid object instead of a flat chevron. -->
+  <path d="M52.5 15.2 12.4 29.1a1 1 0 0 0-.1 1.8l15.2 4.9 5.2 14.6a1 1 0 0 0 1.8.2l18-27.2a1 1 0 0 0 0-1.4l-.6-.6a1 1 0 0 0-1.2-.1Z" fill="url(#plane)"/>
+  <path d="M52.5 15.2 27.5 35.8l-.2 14.9 5.4-14.5L52.5 15.2Z" fill="#CFE9F8"/>
+</svg>

@@ -707,7 +707,6 @@ def run_gui(port=None, view=None):
             text_size=13, content_padding=11,
             border_radius=12,
             on_change=_on_url_change)
-        preview_list = ft.ListView(spacing=12, expand=True)
         status_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
                              expand=True)
         status_icon = ft.Icon(ft.Icons.INFO_OUTLINE, size=13,
@@ -730,27 +729,9 @@ def run_gui(port=None, view=None):
                 page.update()
             except Exception:
                 pass
-        # Empty, not "No previews yet". The empty state below prints that, and
-        # this line used to print it too -- the same sentence twice on an
-        # empty page. render_previews() owns whatever belongs here.
-        count_txt = ft.Text("", size=12,
-                            color=ft.Colors.ON_SURFACE_VARIANT,
-                            weight=ft.FontWeight.W_500)
-        selected_txt = ft.Text("", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
-                               expand=True, weight=ft.FontWeight.W_500)
-        fetch_btn = ft.FilledButton("Fetch titles", icon=ft.Icons.SEARCH,
-                                    height=48, style=ft.ButtonStyle(
-                                        text_style=ft.TextStyle(
-                                            weight=ft.FontWeight.BOLD)))
-        dl_btn = ft.FilledButton("Download selected", icon=ft.Icons.DOWNLOAD,
-                                 disabled=True, height=48, style=ft.ButtonStyle(
-                                     text_style=ft.TextStyle(
-                                         weight=ft.FontWeight.BOLD)))
-        fetch_label = ft.Text("Fetching titles...", size=12,
-                              color=ft.Colors.PRIMARY,
-                              weight=ft.FontWeight.W_600, visible=False)
-        bar = ft.ProgressBar(visible=False, bar_height=6)
-        fetch_row = ft.Row([fetch_label, bar], spacing=8, visible=False)
+        # One button. It was three: Fetch titles, Download selected, and a
+        # disabled grey slab that looked the same but did nothing.
+        add_btn = ft.FilledButton("Add", icon=ft.Icons.ADD, height=44)
 
         # --- Mode selector ------------------------------------------------
         # A linked toggle, not three filled cards.
@@ -761,52 +742,6 @@ def run_gui(port=None, view=None):
         # That is the card-soup mistake again, in a place where it hurts most:
         # a secondary choice rendered as the loudest thing on the page.
         #
-        # The reference does the opposite. From style.py:
-        #     box.linked > button { background-color: transparent }
-        #     box.linked > button:checked { background-color: @accent }
-        # One row, the checked segment filled, everything else flat. The
-        # explanation moves under it as a caption rather than inside each card.
-        _MODE_OPTS = [("1", "Original"), ("2", "Fast"), ("3", "Max")]
-        _MODE_DESC = {
-            "1": "Raw file, fastest, no conversion.",
-            "2": "Compressed MP4, veryfast, smaller.",
-            "3": "Best quality compressed, smallest.",
-        }
-        mode_blurb_txt = ft.Text(_MODE_DESC.get(state.get("mode", "1"), ""),
-                                 size=11, expand=True,
-                                 color=ft.Colors.ON_SURFACE_VARIANT)
-
-        def _apply_mode(val: str):
-            """Single writer for the output mode.
-
-            Everything that changes the mode -- the toggle, the Settings hint
-            refresh, and the danger-zone reset -- goes through here, so the
-            toggle's painted state can never drift from the stored setting.
-            """
-            state["mode"] = val
-            s = load_settings()
-            s.output_mode = val
-            save_settings(s)
-            mode_blurb_txt.value = _MODE_DESC.get(val, "")
-            refresh_settings_hint()
-
-        def _on_mode_pick(val):
-            _apply_mode(val)
-            try:
-                page.update()
-            except Exception:
-                pass
-
-        mode_toggle = ui.linked_toggle(
-            _MODE_OPTS, state.get("mode", "1"), _on_mode_pick)
-
-        # Reset (Settings -> danger zone) drives the toggle through this handle
-        # rather than poking a hidden control's `selected` list. The old
-        # SegmentedButton it replaced was visible=False and never read by
-        # anything else, so resetting the setting left the visible cards showing
-        # the old mode until the view was rebuilt.
-        state["mode_set"] = _apply_mode
-
         async def ensure_api_or_goto_settings():
             st = load_settings()
             if not st.api_id or not st.api_hash:
@@ -816,7 +751,29 @@ def run_gui(port=None, view=None):
                 return None
             return st
 
-        async def on_fetch(e):
+        async def on_add(e):
+            """Paste links, press Add, done.
+
+            This used to be five steps: Fetch titles, tick the preview list,
+            Download selected, switch to Queue, press Resume all. Every one of
+            them existed to work around the preview, and the preview itself
+            existed only because the queue worker already had everything it
+            needed and the Add tab did not.
+
+            The worker fetches the message for every item anyway -- it has to,
+            there is no file to download without one -- so "Fetch titles" was
+            a second round trip to Telegram for data the worker was about to
+            fetch regardless. Items now go straight into the queue with their
+            URL, the worker names each file from the message it receives, and
+            the user pastes and presses one button.
+
+            What is lost: renaming a file before it downloads, and choosing
+            which of the fetched items to keep. Both were one tap in a list
+            most people did not read. An item that turns out to be wrong is
+            removed from the Queue like any other.
+            """
+            if state["queuing"]:
+                return  # double-click / repeat click must not double-queue
             st = await ensure_api_or_goto_settings()
             if not st:
                 return
@@ -824,197 +781,27 @@ def run_gui(port=None, view=None):
             if not urls:
                 snack(page, "Paste at least one t.me link first.", error=True)
                 return
-            if len(urls) > MAX_URLS:
-                snack(page, f"Capped at {MAX_URLS} URLs; extra links ignored.")
-            state["fetching"] = True
-            fetch_row.visible = True
-            _set_status(f"Fetching {len(urls)} title(s)...")
-            fetch_btn.disabled = True
-            page.update()
-            try:
-                c = await get_client(page)
-                if not await c.is_user_authorized():
-                    ok = await gui_login(page, c)
-                    if not ok:
-                        _set_status("Login cancelled.")
-                        return
-                # This block used to sit AFTER the `raise` at the end of the
-                # RuntimeError handler below, which made it unreachable: the
-                # try body ended at the `return` above, and every path out of
-                # the handler either returned or re-raised. So "Fetch titles"
-                # silently did nothing and dl_btn (born disabled) was never
-                # enabled -- the GUI could not add a single download. It was
-                # introduced by 8f91996, a security fix that inserted the
-                # `raise` without moving the success path. It shipped in v1.3.0.
-                state["previews"] = []
-                for u in urls:
-                    _set_status(f"Fetching: {_sanitize_display(u)}")
-                    page.update()
-                    pv = await tg_client.fetch_preview(c, u)
-                    state["previews"].append({
-                        "url": _sanitize_display(u),
-                        "title": _sanitize_display(pv.title or u),
-                        "ext": pv.ext,
-                        "size": pv.size, "ok": pv.has_media and not pv.error,
-                        "error": _sanitize_display(pv.error), "selected": pv.has_media and not pv.error,
-                    })
-                render_previews()
-                n_ok = sum(1 for r in state["previews"] if r["ok"])
-                _set_status((f"Found {n_ok}/{len(urls)} downloadable. "
-                                    f"Tick + edit titles, then Download selected."))
-                dl_btn.disabled = n_ok == 0
-            except RuntimeError as exc:
-                # An identity-pin mismatch surfaces as a RuntimeError from
-                # get_client(). Offer the explicit reset here rather than
-                # leaving the user with a dead end: without this the pin is
-                # never clearable from the GUI at all.
-                msg = _sanitize_display(str(exc))
-                if "pinned" in msg or "different Telegram account" in msg:
-                    c = state.get("client")
-                    if c is None:
-                        from . import tg_client as _tc
-                        try:
-                            st0 = load_settings()
-                            c = _tc.build_client(st0.api_id_int(), str(st0.api_hash))
-                        except Exception:
-                            c = None
-                    if c is not None and await _reset_identity_pin(page, c):
-                        _set_status("Account pin cleared — sign in again.")
-                        snack(page, "Account pin cleared. Sign in with the "
-                                    "account you want to use.")
-                        page.update()
-                        return
-                    _set_status(msg)
-                    snack(page, msg, error=True)
-                    page.update()
-                    return
-                raise
-            except Exception as exc:
-                _set_status(f"Fetch failed: {_sanitize_display(exc)}")
-                snack(page, _sanitize_display(str(exc)), error=True)
-            finally:
-                state["fetching"] = False
-                fetch_row.visible = False
-                fetch_btn.disabled = False
-                page.update()
-
-        def render_previews():
-            preview_list.controls.clear()
-            oks = [r for r in state["previews"] if r["ok"]]
-            bad = len(state["previews"]) - len(oks)
-            if not state["previews"]:
-                preview_list.controls.append(empty_state(
-                    ft.Icons.DOWNLOAD_OUTLINED, "No previews yet",
-                    "Paste links above and tap Fetch titles."))
-            else:
-                count_txt.value = (f"{len(oks)} downloadable"
-                                   + (f"  \u2022  {bad} skipped" if bad else ""))
-            n_sel = sum(1 for r in oks if r["selected"])
-            selected_txt.value = (f"{n_sel} of {len(oks)} selected."
-                                  if oks else "")
-            dl_btn.disabled = n_sel == 0
-            # The chrome around the list appears with the list. count_txt is
-            # only read inside preview_head, so there is nothing to keep in
-            # sync while it is hidden.
-            preview_head.visible = bool(state["previews"])
-            preview_cta.visible = bool(state["previews"])
-            for i, r in enumerate(state["previews"]):
-                if r["ok"]:
-                    title_field = ft.TextField(
-                        value=r["title"], label=f"Title {i + 1}",
-                        dense=True, expand=True, border_radius=8,
-                        content_padding=10,
-                        on_change=lambda e, idx=i: state["previews"].__getitem__(idx).__setitem__("title", e.control.value))
-                    chk = ft.Checkbox(
-                        value=r["selected"],
-                        tooltip="Include in download",
-                        on_change=lambda e, idx=i: (
-                            state["previews"].__getitem__(idx).__setitem__(
-                                "selected", e.control.value),
-                            render_previews()))
-                    meta_row = ft.Row([
-                        ft.Container(
-                            ft.Row([ft.Icon(ft.Icons.DESCRIPTION, size=13,
-                                            color=ft.Colors.ON_SURFACE_VARIANT),
-                                    ft.Text(r["ext"].upper(), size=11,
-                                            weight=ft.FontWeight.W_600,
-                                            color=ft.Colors.ON_SURFACE_VARIANT)],
-                                   spacing=4, tight=True),
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
-                            border_radius=6, padding=4),
-                        ft.Container(
-                            ft.Row([ft.Icon(ft.Icons.STORAGE, size=13,
-                                            color=ft.Colors.ON_SURFACE_VARIANT),
-                                    ft.Text(format_bytes(r["size"]), size=11,
-                                            weight=ft.FontWeight.W_600,
-                                            color=ft.Colors.ON_SURFACE_VARIANT)],
-                                   spacing=4, tight=True),
-                            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
-                            border_radius=6, padding=4),
-                    ], spacing=8)
-                    preview_list.controls.append(ft.Card(
-                        elevation=2,
-                        shape=ft.RoundedRectangleBorder(radius=12),
-                        content=ft.Container(
-                            ft.Row([
-                                chk,
-                                ft.Column([title_field, meta_row],
-                                          spacing=6, expand=True),
-                            ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START),
-                            padding=16)))
-                else:
-                    preview_list.controls.append(error_box(
-                        f"{_sanitize_display(r['url'])}\nSkipped: {_sanitize_display(r['error'])}"))
-            page.update()
-
-        def on_select_all(e):
-            for r in state["previews"]:
-                if r["ok"]:
-                    r["selected"] = True
-            render_previews()
-
-        def on_select_none(e):
-            for r in state["previews"]:
-                if r["ok"]:
-                    r["selected"] = False
-            render_previews()
-
-        async def on_download(e):
-            if state["queuing"]:
-                return  # double-click / repeat click must not double-queue
-            sel = [r for r in state["previews"] if r["ok"] and r["selected"]]
-            if not sel:
-                snack(page, "Nothing selected.", error=True)
-                return
-            st = load_settings()
-            try:
-                out_dir = ensure_download_dir(st)
-            except (OSError, ValueError) as exc:
-                snack(page, _sanitize_display(f"Cannot use download folder: {exc}"), error=True)
-                return
-            confirmed = await confirm_dialog(
-                page, f"Download {len(sel)} file(s) to:\n{out_dir}?",
-                "\n".join(f"• {safe_filename(r['title'])}{r['ext']}" for r in sel[:8])
-                + (f"\n… +{len(sel) - 8} more" if len(sel) > 8 else ""))
-            if not confirmed:
-                return
             state["queuing"] = True
-            dl_btn.disabled = True
-            page.update()
+            add_btn.disabled = True
+            _set_status(f"Adding {len(urls)} link(s)…")
             try:
-                items = [DownloadItem(url=r["url"], title=safe_filename(r["title"]),
-                                      ext=r["ext"], size=r["size"], status="queued",
-                                      mode=r.get("mode") or state.get("mode") or st.output_mode or "1")
-                         for r in sel]
+                items = [DownloadItem(url=u, mode=st.output_mode or "1",
+                                      status="queued")
+                         for u in urls]
                 added = store.extend(items)
                 if len(added) < len(items):
                     snack(page,
-                          f"Queue near full: added {len(added)} of {len(items)} file(s).",
-                          error=True)
+                          f"Queue near full: added {len(added)} of "
+                          f"{len(items)} link(s).", error=True)
                 else:
-                    snack(page, f"Queued {len(added)} file(s) — see Queue tab.")
+                    snack(page, f"Downloading {len(added)} link(s).")
+                url_box.value = ""
+                url_count_txt.value = ""
+                _on_url_change(None)
             finally:
                 state["queuing"] = False
+                add_btn.disabled = False
+                _set_status("")
             if "goto" in nav:
                 nav["goto"](1)
             await start_queue(page)
@@ -1080,33 +867,11 @@ def run_gui(port=None, view=None):
 
         def on_clear(e):
             url_box.value = ""
-            state["previews"] = []
-            preview_list.controls.clear()
-            preview_list.controls.append(empty_state(
-                ft.Icons.DOWNLOAD_OUTLINED, "No previews yet",
-                "Paste links above and tap Fetch titles."))
-            count_txt.value = ""
-            selected_txt.value = ""
-            dl_btn.disabled = True
+            _on_url_change(None)
             _set_status("")
             page.update()
 
-        # Preview chrome, hidden until there is something to select. Both are
-        # defined here rather than inline in the tree because render_previews()
-        # toggles them, and an inline literal would have no handle.
-        preview_head = ft.Row(
-            [ui.section_label("Preview"), ft.Container(expand=True),
-             count_txt,
-             ft.TextButton("Select all", on_click=on_select_all),
-             ft.TextButton("Select none", on_click=on_select_none)],
-            spacing=8, visible=False)
-        preview_cta = ft.Row([selected_txt, dl_btn], spacing=12,
-                             alignment=ft.MainAxisAlignment.END,
-                             visible=False)
-
-        fetch_btn.on_click = on_fetch
-        dl_btn.on_click = on_download
-        render_previews()
+        add_btn.on_click = on_add
 
         return ft.Column([
             # The textarea IS the card.
@@ -1149,7 +914,7 @@ def run_gui(port=None, view=None):
                     ft.Container(
                         width=176,
                         content=ft.Column(
-                            [fetch_btn,
+                            [add_btn,
                              ft.Row([
                                  ui.icon_button(ft.Icons.FILE_OPEN,
                                                 "Load links from a .txt file",
@@ -1166,43 +931,8 @@ def run_gui(port=None, view=None):
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
 
-            fetch_row,
             status_row,
-
-            # Output mode: muted label, linked toggle, explanation underneath.
-            ft.Column(
-                [ui.section_label("Output mode"),
-                 ft.Row([mode_toggle, mode_blurb_txt], spacing=12,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER)],
-                spacing=8,
-                horizontal_alignment=ft.CrossAxisAlignment.START,
-            ),
-
-            # Preview. No outer card -- preview_list already renders each row
-            # as its own card, so wrapping the list in a fourth box would put a
-            # border around a stack of borders.
-            ft.Column(
-                # The header row only exists once there is something in it. It
-                # used to render unconditionally, so an empty Add tab showed
-                # "No previews yet" TWICE -- once here and once in the empty
-                # state -- plus "Select all"/"Select none" over a list with
-                # nothing in it, plus a disabled "Download selected" slab.
-                # None of those controls can do anything at that point.
-                [preview_head,
-                 preview_list,
-                 # No wrap=True: the Flutter Wrap cannot hold expand=True
-                 # children, and the combination collapsed the layout into an
-                 # unbounded (~100k px) scroll gap that pushed the primary
-                 # "Download selected" CTA off-screen.
-                 preview_cta,
-                ],
-                spacing=8,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                # The list is the only part of this view that should grow to
-                # fill a tall window. expand on the Column, not on the page.
-                expand=True,
-            ),
-        ], spacing=20, scroll=ft.ScrollMode.AUTO, expand=True,
+        ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True,
            horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def open_folder(page):
@@ -1281,6 +1011,7 @@ def run_gui(port=None, view=None):
                         _last[0] = now
                         refresh_queue()
                 try:
+                    from .telegram_utils import auto_title_from_message
                     from .telegram_utils import parse_message_url
                     from .telegram_utils import infer_extension
                     try:
@@ -1324,7 +1055,19 @@ def run_gui(port=None, view=None):
                             "Telegram didn't respond within 2 minutes. The service may be busy — please try again shortly.") from exc
                     if not msg or not getattr(msg, "media", None):
                         raise RuntimeError("Message has no downloadable media.")
-                    stem = safe_filename(item.title or f"msg-{mid}")
+                    # Name the file from the message we just fetched, not from
+                    # a title the user had to set on a preview screen. The
+                    # Add tab no longer previews anything, so item.title is
+                    # normally empty and every file would otherwise land as
+                    # msg-12345.mp4.
+                    stem = safe_filename(item.title
+                                         or auto_title_from_message(msg, chat))
+                    try:
+                        store.update(item.id, title=stem, ext=ext,
+                                     size=int(getattr(getattr(msg, "file", None),
+                                                      "size", 0) or 0))
+                    except Exception:
+                        pass
                     ext = infer_extension(msg)
                     source = out_dir / f"{stem}{ext}"
                     target = out_dir / f"{stem}.mp4"
@@ -2256,21 +1999,51 @@ def run_gui(port=None, view=None):
         mode_blurb_txt = ft.Text(MODE_BLURB[_mk], size=12.5,
                                  color=ft.Colors.ON_SURFACE_VARIANT)
         settings_refs["mode_blurb"] = mode_blurb_txt
+
+        # The mode picker lives here now, not on the Add tab.
+        #
+        # Add used to carry it under the input, which meant the one tab whose
+        # whole job is "paste a link and press Add" also had a three-way
+        # choice, an explanation of the choice, and a live blurb that tracked
+        # it. Settings already explained exactly what the three modes do, and
+        # showed the current one -- so the control was duplicated and the
+        # simpler screen was the one carrying the extra weight.
+        def _apply_mode(val: str):
+            """Single writer for the output mode.
+
+            Settings' toggle and the danger-zone reset both go through here, so
+            the painted state cannot drift from the stored setting.
+            """
+            s = load_settings()
+            s.output_mode = val
+            save_settings(s)
+            state["mode"] = val
+            try:
+                mode_blurb_txt.value = MODE_BLURB.get(val, MODE_BLURB["1"])
+            except Exception:
+                pass
+            refresh_settings_hint()
+
+        def _on_mode_pick(val: str):
+            _apply_mode(val)
+            try:
+                page.update()
+            except Exception:
+                pass
+
+        mode_toggle = ui.linked_toggle(
+            [("1", "Original"), ("2", "Fast"), ("3", "Max")],
+            _mk, _on_mode_pick)
+        state["mode_set"] = _apply_mode
+
         mode_card = group(
             "Output mode",
-            [
-                ft.Text(MODE_BLURB[_mk], size=12.5,
-                        color=ft.Colors.ON_SURFACE_VARIANT),
-                ft.Text("If a video is already H.264/AAC it is repackaged "
-                        "without re-encoding, so all three behave the same. "
-                        "Change it per download on the Add tab.",
-                        size=11, color=ft.Colors.ON_SURFACE_VARIANT),
-            ],
-            icon=ft.Icons.TUNE,
-            action=ft.Row([ft.Text(MODE_LABELS.get(_mk, _mk), size=12,
-                                   weight=ft.FontWeight.W_600,
-                                   color=ft.Colors.PRIMARY),
-                           badge("DEFAULT", "neutral")], spacing=8))
+            [mode_toggle,
+             mode_blurb_txt,
+             ft.Text("If a video is already H.264/AAC it is repackaged "
+                     "without re-encoding, so all three behave the same.",
+                     size=11, color=ft.Colors.ON_SURFACE_VARIANT)],
+            icon=ft.Icons.TUNE)
 
         # --- About ------------------------------------------------------
         # One of the two groups that keeps a card. It holds a table of
@@ -2852,13 +2625,17 @@ def run_gui(port=None, view=None):
                 fit=ft.BoxFit.CONTAIN,
             )
         else:
+            # Rounded, not a hard square, and a send mark rather than a generic
+            # download arrow -- this is the fallback for when the packaged SVG
+            # cannot be read, so it should not be a visibly different icon.
             app_logo = ft.Container(
                 width=20, height=20,
-                border_radius=0,
+                border_radius=5,
                 bgcolor="#2AABEE",
                 alignment=ft.Alignment.CENTER,
                 padding=0,
-                content=ft.Icon(ft.Icons.DOWNLOAD, color="#0F1117", size=13),
+                content=ft.Icon(ft.Icons.SEND_ROUNDED, color="#FFFFFF",
+                                size=13),
             )
 
         # -- Body container ------------------------------------------------
@@ -2947,18 +2724,40 @@ def run_gui(port=None, view=None):
         # background, and a third alignment axis for the centred body below --
         # that stack is why the app read as a government form. Brand, tabs and
         # toggle belong on one line; colour now means status, not chrome.
+        #   [◆ Telegram Downloader]  │  Add   Queue   Settings   ·····  [☀]
+        #
+        # The brand and the navigation were previously separated by nothing but
+        # a 16px gap, so logo, wordmark and three tabs all read as one undifferentiated
+        # row of small text. A hairline between them says which half is identity
+        # and which half is navigation, and costs one 1px line.
+        #
+        # The bar itself is page tone with a bottom hairline -- no fill. See the
+        # scaffold/card note in ui.py: a panel-coloured header turned the top of
+        # the window into a band across a window whose whole point is that the
+        # content is flat.
+        brand = ft.Row(
+            [app_logo,
+             ft.Text("Telegram Downloader", size=13.5,
+                     weight=ft.FontWeight.W_600)],
+            spacing=9, tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        divider = ft.Container(
+            width=1, height=18,
+            bgcolor=ft.Colors.OUTLINE_VARIANT,
+            margin=ft.Margin.symmetric(horizontal=14),
+        )
+
         top_bar = _bar(
             ft.Row(
                 [
-                    app_logo,
-                    ft.Text("Telegram Downloader", size=13,
-                            weight=ft.FontWeight.W_600),
-                    ft.Container(width=16),   # gap between brand and tabs
+                    brand,
+                    divider,
                     _add_chip, queue_chip, _settings_chip,
                     ft.Container(expand=True),   # pushes toggle to the right
                     theme_btn,
                 ],
-                spacing=4,
+                spacing=2,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             # No fill. The header is the same tone as the page, separated only

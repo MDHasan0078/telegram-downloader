@@ -177,20 +177,43 @@ def test_download_location_is_reachable_from_the_window_chrome():
 
 
 def test_gui_add_flow_is_reachable():
-    """on_fetch must still fetch previews and render them.
+    """The Add flow must end up in the queue, and it must start there too.
 
-    Named specifically so that if this ever regresses again, the failure
-    points at the user-facing flow rather than at a generic structural check.
+    This test originally pinned the five-step preview flow: on_fetch had to
+    fetch previews and render them. That flow was the bug it was watching for
+    -- it shipped broken in v1.3.0 -- but the fix was to delete the step, not
+    to restore it, so the assertion now pins the shape that replaced it.
+
+    on_add must put the pasted URLs into the queue and start the worker. If
+    that ever inverts again -- items built but never queued, or queued but
+    never started -- the app looks fine and downloads nothing, which is exactly
+    how the v1.3.0 regression presented.
     """
     tree = ast.parse((SRC / "gui.py").read_text(encoding="utf-8"))
-    on_fetch = [n for n in ast.walk(tree)
-                if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
-                and n.name == "on_fetch"]
-    assert len(on_fetch) == 1, "expected exactly one on_fetch"
-    used = {n.id for n in ast.walk(on_fetch[0]) if isinstance(n, ast.Name)}
-    used |= {n.attr for n in ast.walk(on_fetch[0]) if isinstance(n, ast.Attribute)}
-    assert "fetch_preview" in used, "on_fetch no longer fetches previews"
-    assert "render_previews" in used, "on_fetch no longer renders previews"
+    on_add = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+              and n.name == "on_add"]
+    assert len(on_add) == 1, "expected exactly one on_add"
+    used = {n.id for n in ast.walk(on_add[0]) if isinstance(n, ast.Name)}
+    used |= {n.attr for n in ast.walk(on_add[0]) if isinstance(n, ast.Attribute)}
+    assert "split_urls" in used, "on_add no longer parses the pasted links"
+    assert "extend" in used, "on_add no longer adds the items to the queue"
+    assert "start_queue" in used, (
+        "on_add queues the items but never starts the worker, so the user "
+        "pastes a link, presses Add, and nothing happens")
+
+
+def test_the_queue_worker_names_files_from_the_fetched_message():
+    """A queued item with no title must still get a real filename.
+
+    Adding no longer previews anything, so DownloadItem arrives with an empty
+    title. The worker names the file from the message it fetches; without that
+    every download lands as msg-12345.mp4.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "auto_title_from_message(msg, chat)" in text, (
+        "the worker no longer derives the filename from the message it "
+        "fetches; files will be saved as msg-<id>")
 
 
 def test_title_bar_uses_the_packaged_app_logo():
@@ -208,9 +231,20 @@ def test_title_bar_uses_the_packaged_app_logo():
 
     svg = base64.b64decode(src.split(",", 1)[1]).decode("utf-8")
     assert svg.lstrip().startswith("<svg"), "asset is not an SVG"
-    # The brand colours must survive: Telegram-blue tile, dark glyph.
-    assert "#2AABEE" in svg, "logo lost its blue tile"
-    assert "#0F1117" in svg, "logo lost its dark glyph"
+    # Pin the mark's PROPERTIES, not the old hex values. These three are what
+    # made the previous logo look cheap rather than merely old: a hard 64x64
+    # square (rx="0") with a generic download glyph -- it read as a clipboard
+    # icon, and it was not obviously Telegram.
+    #   1. rounded tile, not a hard square
+    #   2. a Telegram-blue ground
+    #   3. a light glyph on that ground, for contrast at 20px in the top bar
+    assert 'rx="16"' in svg or "rx='16'" in svg, (
+        "the logo tile is square again; the shipped mark is a 16px-radius "
+        "rounded square")
+    assert "#2AABEE" in svg, "logo lost its Telegram-blue ground"
+    assert "#FFFFFF" in svg.upper(), (
+        "the logo glyph is not white; at 20px in the top bar it has to read "
+        "against the blue tile")
 
     # And the AppBar logo must be built from ft.Image (the real
     # asset), with the primitives only as a fallback branch.
@@ -606,12 +640,12 @@ def test_no_page_header_helper():
 
 
 def test_empty_state_text_is_not_duplicated():
-    """`count_txt` must not repeat the empty state's headline.
+    """No string may say "No previews yet" anywhere.
 
     The Preview header rendered unconditionally and hardcoded
     count_txt.value = "No previews yet", while the empty state below it said
-    "No previews yet". An empty Add tab therefore showed the same sentence
-    twice, ~250px apart.
+    the same thing -- the sentence appeared twice on an empty Add tab. The
+    preview step is gone entirely now, so the phrase has no reason to exist.
     """
     text = GUI_PY.read_text(encoding="utf-8")
     tree = ast.parse(text)
@@ -626,20 +660,6 @@ def test_empty_state_text_is_not_duplicated():
         f"'No previews yet' assigned at line(s) {offenders}; the empty state "
         "already prints it. The header row is hidden while the list is empty, "
         "so there is nothing to keep in sync.")
-
-
-def test_preview_chrome_is_hidden_while_the_list_is_empty():
-    """Select all / Select none / Download must not render over an empty list.
-
-    None of those three controls can do anything before anything is fetched, so
-    showing them meant two dead text buttons and a disabled CTA slab floating
-    in an empty page.
-    """
-    text = GUI_PY.read_text(encoding="utf-8")
-    assert "preview_head.visible = bool(state[\"previews\"])" in text
-    assert "preview_cta.visible = bool(state[\"previews\"])" in text
-    assert 'preview_head = ft.Row(' in text, (
-        "preview_head must be built before render_previews() can toggle it")
 
 
 def test_queue_summary_counters_carry_no_background_fill():

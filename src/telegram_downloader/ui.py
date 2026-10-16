@@ -125,7 +125,13 @@ SURFACE_RAMP_LIGHT = dict(
 
 
 def theme(dark: bool = True) -> ft.Theme:
-    """Build a Flet theme from a token set."""
+    """Build a Flet theme from a token set.
+
+    The surface ramp is written out longhand rather than splatted from a dict:
+    scripts/check_flet_api.py verifies every ColorScheme kwarg statically and
+    a `**ramp` is opaque to it, so a typo in a ramp key would reach a released
+    build with nothing catching it.
+    """
     t = DARK if dark else LIGHT
     ramp = SURFACE_RAMP_DARK if dark else SURFACE_RAMP_LIGHT
     th = ft.Theme(
@@ -158,7 +164,11 @@ def theme(dark: bool = True) -> ft.Theme:
             # is #444444 on a #2D2D2D fill. A hairline lighter than the fill is
             # what makes a card read as a card; a darker one just draws a seam.
             outline_variant=t["border_strong"],
-            **ramp,
+            surface_container_lowest=ramp["surface_container_lowest"],
+            surface_container_low=ramp["surface_container_low"],
+            surface_container=ramp["surface_container"],
+            surface_container_high=ramp["surface_container_high"],
+            surface_container_highest=ramp["surface_container_highest"],
         ),
     )
     # Hidden at rest, shown while scrolling. The GTK reference does the same
