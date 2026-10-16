@@ -582,3 +582,101 @@ def test_every_surface_role_the_gui_uses_is_actually_set():
                  "on_surface_variant"):
         value = getattr(scheme, role, None)
         assert value, f"ColorScheme.{role} is unset; it will be generated"
+
+
+# ---------------------------------------------------------------------------
+# Minimalism. These are the things that made the app look busy while nothing
+# was actually wrong: a page title duplicating the tab label, the same empty
+# message printed twice, controls rendered over an empty list, and per-row
+# decoration restating what the row already showed.
+# ---------------------------------------------------------------------------
+
+def test_no_page_header_helper():
+    """Each tab used to open with an icon tile + 16px title + subtitle.
+
+    The tab strip directly above already says which tab you are on, so this
+    printed "Queue" / "Queue" and "Settings" / "Settings" -- a full line of
+    duplicate chrome on every screen, on top of a one-line explanation of
+    something self-evident. The reference has no page title at all: the tab
+    underline is the page title.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "def h1(" not in text, (
+        "the page-header helper is back; the tab label already names the page")
+
+
+def test_empty_state_text_is_not_duplicated():
+    """`count_txt` must not repeat the empty state's headline.
+
+    The Preview header rendered unconditionally and hardcoded
+    count_txt.value = "No previews yet", while the empty state below it said
+    "No previews yet". An empty Add tab therefore showed the same sentence
+    twice, ~250px apart.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    offenders = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+                and "No previews yet" in node.value.value):
+            offenders.append(node.lineno)
+    assert not offenders, (
+        f"'No previews yet' assigned at line(s) {offenders}; the empty state "
+        "already prints it. The header row is hidden while the list is empty, "
+        "so there is nothing to keep in sync.")
+
+
+def test_preview_chrome_is_hidden_while_the_list_is_empty():
+    """Select all / Select none / Download must not render over an empty list.
+
+    None of those three controls can do anything before anything is fetched, so
+    showing them meant two dead text buttons and a disabled CTA slab floating
+    in an empty page.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "preview_head.visible = bool(state[\"previews\"])" in text
+    assert "preview_cta.visible = bool(state[\"previews\"])" in text
+    assert 'preview_head = ft.Row(' in text, (
+        "preview_head must be built before render_previews() can toggle it")
+
+
+def test_queue_summary_counters_carry_no_background_fill():
+    """The "2 active / 1 queued / 1 done" line must be plain text.
+
+    These were four bgcolor TextSpans -- four small coloured boxes in a
+    toolbar, the loudest thing on the page before you reached the rows. Only
+    "need attention" keeps its colour, because that one is asking for
+    something.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name != "TextStyle":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "bgcolor":
+                    offenders.append(kw.value.lineno)
+    assert not offenders, (
+        f"TextStyle(bgcolor=...) at line(s) {offenders}; queue summary counters "
+        "are text, not chips.")
+
+
+def test_queue_rows_do_not_restate_the_progress_bar():
+    """No percentage readout and no per-row subtitle under the title.
+
+    Both duplicated what the row already showed: the bar is directly under the
+    title and carries the same number to better precision, and the format is
+    visible in the filename while the status line carries the size for anything
+    in flight.
+    """
+    text = GUI_PY.read_text(encoding="utf-8")
+    assert "def pct_pill(" not in text, (
+        "pct_pill is back; the progress bar already shows the percentage")
+    assert "subtitle_bits" not in text, (
+        "the per-row '.mp4 - 1.3 GB' subtitle is back")
