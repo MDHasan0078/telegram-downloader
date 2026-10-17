@@ -1,23 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Telegram Downloader">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     fill="none" role="img" aria-label="Telegram Downloader">
+  <!--
+    Telegram Downloader's mark: "Descent".
+
+    A paper plane, drawn from Telegram's grammar but not from Telegram's
+    artwork, banked 45 degrees so it flies DOWN the diagonal rather than up and
+    away. The app's job is bringing media down, not sending messages up. The
+    tile's light runs from the top-left corner the plane came from into the deep
+    teal it is heading for, so the gradient reinforces the direction of travel.
+
+    Geometry, in the tile's own 64-unit space. A paper plane is two faces: the
+    bright wing, and the keel the light cannot reach.
+
+        A  wing rear corner   (17.02, 10.63)
+        T  tip                (54.00, 39.97)
+        B  keel trailing edge (26.58, 53.36)
+        S  keel spike         (10.00, 34.23)
+        N  fold bite          (20.21, 35.50)   concave, where the underside folds
+
+    wing  A / T / S          keel  T / B / N / S
+
+    B sits almost under the tip (Telegram's own mark does the same), which is
+    what keeps the nose sharp; an earlier draft had it ten units back and the
+    plane read as a blunt wedge. The glyph is 44 of the tile's 64 units, so at
+    the 20px header size it is still about 14px of solid white: big enough to
+    read, small enough to leave the tile's corner radius visible.
+  -->
   <defs>
-    <linearGradient id="tile" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#4FC3F7"/>
-      <stop offset=".55" stop-color="#2AABEE"/>
-      <stop offset="1" stop-color="#1573B0"/>
-    </linearGradient>
-    <linearGradient id="plane" x1="18" y1="18" x2="46" y2="46" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#E4F4FD"/>
+    <linearGradient id="tile" x1="7" y1="2" x2="57" y2="62"
+                    gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2AC9D6"/>
+      <stop offset="1" stop-color="#074B58"/>
     </linearGradient>
   </defs>
 
-  <!-- Tile. Rounded, gently lit from the top-left. The old mark was a hard
-       64x64 square (rx=0) with a generic download arrow, which read as a
-       clipboard icon rather than as Telegram. -->
-  <rect width="64" height="64" rx="16" fill="url(#tile)"/>
+  <!-- Tile. A squircle, never a hard square: rx=17 of 64 leaves a shape that
+       still reads as a tile at 256px and a soft-cornered mark at 16px. -->
+  <rect x="0" y="0" width="64" height="64" rx="17" fill="url(#tile)"/>
 
-  <!-- Paper plane. Two faces: the lit upper face and the shaded fold, which is
-       what makes it read as a solid object instead of a flat chevron. -->
-  <path d="M52.5 15.2 12.4 29.1a1 1 0 0 0-.1 1.8l15.2 4.9 5.2 14.6a1 1 0 0 0 1.8.2l18-27.2a1 1 0 0 0 0-1.4l-.6-.6a1 1 0 0 0-1.2-.1Z" fill="url(#plane)"/>
-  <path d="M52.5 15.2 27.5 35.8l-.2 14.9 5.4-14.5L52.5 15.2Z" fill="#CFE9F8"/>
+  <!-- Wing: the lit face. -->
+  <path d="M17.02 10.63 L54 39.97 L10 34.23 Z" fill="#FFFFFF"/>
+
+  <!-- Keel: the shaded face behind the fold. Held at 62% opacity rather than a
+       second flat grey so it picks up whatever the tile is doing underneath. -->
+  <path d="M54 39.97 L26.58 53.36 L20.21 35.5 L10 34.23 Z"
+        fill="#FFFFFF" fill-opacity="0.62"/>
 </svg>
