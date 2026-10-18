@@ -231,20 +231,20 @@ def test_title_bar_uses_the_packaged_app_logo():
 
     svg = base64.b64decode(src.split(",", 1)[1]).decode("utf-8")
     assert svg.lstrip().startswith("<svg"), "asset is not an SVG"
-    # Pin the mark's PROPERTIES, not the old hex values. These three are what
-    # made the previous logo look cheap rather than merely old: a hard 64x64
-    # square (rx="0") with a generic download glyph -- it read as a clipboard
-    # icon, and it was not obviously Telegram.
-    #   1. rounded tile, not a hard square
-    #   2. a Telegram-blue ground
+    # Pin the mark's PROPERTIES, not the exact artwork of the week. These
+    # three are what keep it from reading as a clipboard icon:
+    #   1. a rounded squircle tile, never a hard square
+    #   2. a ground from the app's cyan-aqua family -- Telegram's blue, one
+    #      step warmer: recognisably related, plainly not the same
     #   3. a light glyph on that ground, for contrast at 20px in the top bar
-    assert 'rx="16"' in svg or "rx='16'" in svg, (
-        "the logo tile is square again; the shipped mark is a 16px-radius "
-        "rounded square")
-    assert "#2AABEE" in svg, "logo lost its Telegram-blue ground"
+    assert 'rx="17"' in svg or "rx='17'" in svg, (
+        "the logo tile is no longer the 17px-radius squircle of 'Descent'")
+    assert "#2AC9D6" in svg, (
+        "logo lost its teal ground; the mark must stay in the app's "
+        "cyan-aqua accent family")
     assert "#FFFFFF" in svg.upper(), (
         "the logo glyph is not white; at 20px in the top bar it has to read "
-        "against the blue tile")
+        "against the teal tile")
 
     # And the AppBar logo must be built from ft.Image (the real
     # asset), with the primitives only as a fallback branch.
@@ -559,37 +559,35 @@ def _luma(rgb):
     return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
 
 
-def test_cards_recede_into_the_page_in_both_modes():
-    """A card fill must be DARKER than the scaffold on dark, LIGHTER on light.
+def test_surface_ramp_is_ordered_in_both_modes():
+    """The five surface tones must form the ramp the design language names.
 
-    This is the single relationship that decides whether the app reads as a
-    page or as a stack of boxes, and it was backwards for several iterations.
-    Card luminance was ~40% ABOVE the scaffold, so every card was a bright
-    panel sitting on a dark page.
-
-    Measured off the reference app rather than reasoned about from its CSS:
-
-        simple-yt-downloader   scaffold #353535   card #2D2D2D   recedes
-        this app, before       scaffold #0B101C   card #121A2B   lifted
-
-    Cards always recede *into* the page; the hairline is the only thing that
-    says "box". Light mode flips both values and keeps the same relationship,
-    which is what Material does too.
+    The vocabulary is positional, not decorative: wells are *below* the page
+    (the link field, a progress trough, the nav strip) and raised / floating
+    are *above* it (the selected nav pill, the bottom bar, dialogs). So
+    luminance must rise in one direction -- the same direction -- in both
+    modes, and "below the page" / "above the page" must be strict, not
+    approximate. Scramble this and the tones stop meaning anything: that is
+    exactly when the app starts reading as a stack of boxes.
     """
     from telegram_downloader import ui
 
+    order = ("well_deep", "well", "page", "raised", "floating")
     for name, tokens in (("dark", ui.DARK), ("light", ui.LIGHT)):
-        scaffold = _luma(_hex_rgb(tokens["bg"]))
-        card = _luma(_hex_rgb(tokens["surface"]))
-        if name == "dark":
-            assert card < scaffold, (
-                f"dark card #{tokens['surface']} is not darker than the "
-                f"scaffold #{tokens['bg']} -- the cards read as bright panels "
-                "stacked on a dark page")
-        else:
-            assert card > scaffold, (
-                f"light card #{tokens['surface']} is not lighter than the "
-                f"scaffold #{tokens['bg']}")
+        lum = {k: _luma(_hex_rgb(tokens[k])) for k in order}
+        # Monotonic overall. A tie is only tolerable where a mode has nothing
+        # higher to reach: light's floating and raised are both #FFFFFF.
+        for lo, hi in zip(order, order[1:]):
+            assert lum[lo] <= lum[hi], (
+                f"{name}: {lo} {tokens[lo]} is lighter than {hi} "
+                f"{tokens[hi]} -- the surface ramp is out of order")
+        # Positional and strict: a well is below the page, raised is above it.
+        assert lum["well_deep"] < lum["page"] and lum["well"] < lum["page"], (
+            f"{name}: a well is not below the page; input troughs would "
+            "read as raised panels")
+        assert lum["page"] < lum["raised"], (
+            f"{name}: raised is not above the page; bars and pills would "
+            "sink instead of sitting on top")
 
 
 def test_every_surface_role_the_gui_uses_is_actually_set():
