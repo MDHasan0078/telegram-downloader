@@ -68,7 +68,7 @@ def test_gui_nav_destinations_match_the_views_list():
     views_block = re.search(r"views = \[(.*?)\]\n", src, re.S)
     assert views_block, "could not find the views list in gui.py"
     entries = re.findall(r"(\w+)\(page\)", views_block.group(1))
-    assert entries == ["downloads_view", "queue_view", "settings_view"], (
+    assert entries == ["downloads_view", "queue_view", "auth_view", "settings_view"], (
         f"unexpected views list: {entries}")
 
     # Navigation is a top row of chips built from primitives. flet 0.86.5's
@@ -77,9 +77,9 @@ def test_gui_nav_destinations_match_the_views_list():
     # The chip-into-view alignment is what matters, so match ANY variable name
     # being assigned a chip. Hardcoding "queue_chip =" only made this test
     # break when a chip was renamed, which is not the invariant worth pinning.
-    chips = re.findall(r"^\s+(?:\w+ = )?_make_chip\((\d+), \"(\w+)\"",
+    chips = re.findall(r"^\s+(?:\w+ = )?_make_chip\((\d+), \"([^\"]+)\"",
                        src, re.M)
-    # Compare by index, not source order: `queue_chip` is hoisted out of the Row
+    # Compare by index, not source order: `ongoing_chip` is hoisted out of the Row
     # so refresh_queue() can reach it, so it appears first in the source.
     by_index = {int(i): label for i, label in chips}
     assert sorted(by_index) == list(range(len(entries))), (
@@ -87,7 +87,7 @@ def test_gui_nav_destinations_match_the_views_list():
         f"{len(entries)} views; _make_chip indexes into `views`, so a gap or "
         "a stale index shows the wrong page or raises IndexError")
     assert [by_index[i] for i in range(len(entries))] == \
-        ["Add", "Queue", "Settings"], f"unexpected tab labels: {by_index}"
+        ["Add", "Ongoing", "Account auth", "Settings"], f"unexpected tab labels: {by_index}"
 
     # The side rail and the bottom nav bar are gone; if either comes back the
     # layout will double up with the top chips.
@@ -103,10 +103,10 @@ def test_gui_nav_destinations_match_the_views_list():
 def test_tab_chips_are_keyed_by_index_not_construction_order():
     """A click must highlight the chip that was clicked.
 
-    `queue_chip` is constructed BEFORE the Row, because refresh_queue() needs
-    a handle on it. So _tab_chips is [Queue, Add, Settings] while the screen
-    shows [Add, Queue, Settings]. Styling keyed on enumerate() order therefore
-    highlighted the wrong chip -- clicking "Add" lit up "Queue", which reads as
+    `ongoing_chip` is constructed BEFORE the Row, because refresh_queue() needs
+    a handle on it. So _tab_chips is [Ongoing, Add, Account auth, Settings] while the screen
+    shows [Add, Ongoing, Account auth, Settings]. Styling keyed on enumerate() order therefore
+    highlighted the wrong chip -- clicking "Add" lit up "Ongoing", which reads as
     the navigation being broken.
 
     The fix tags each chip with data=idx and matches on that. This test exists
@@ -118,22 +118,19 @@ def test_tab_chips_are_keyed_by_index_not_construction_order():
 
     selection = src[src.index("def _set_selected_index"):
                     src.index("def on_nav")]
-    assert "chip.data == idx" in selection, \
-        "selection must match on chip.data, not list position"
-    assert "enumerate(_tab_chips)" not in selection, \
-        "selection must not depend on construction order"
+    assert "chip.data == idx" in selection,         "selection must match on chip.data, not list position"
+    assert "enumerate(_tab_chips)" not in selection,         "selection must not depend on construction order"
 
     # Construction order really does differ from visual order -- that is the
     # whole reason position-based matching was wrong.
-    builds = re.findall(r'^\s+(?:\w+ = )?_make_chip\((\d+), "(\w+)"',
+    builds = re.findall(r'^\s+(?:\w+ = )?_make_chip\((\d+), "([^"]+)"',
                         src, re.M)
     order = [int(i) for i, _ in builds]
-    assert order != [0, 1, 2], (
+    assert order != [0, 1, 2, 3], (
         "chips are built in visual order; this test's premise (and the "
         "data=idx fix) assumed they are not")
     by_index = {int(i): label for i, label in builds}
-    assert [by_index[i] for i in range(3)] == ["Add", "Queue", "Settings"], \
-        f"index->label mapping is wrong: {by_index}"
+    assert [by_index[i] for i in range(4)] == ["Add", "Ongoing", "Account auth", "Settings"],         f"index->label mapping is wrong: {by_index}"
 
 
 def test_readme_documents_only_real_gui_pages():
@@ -162,18 +159,53 @@ def test_download_location_is_reachable_from_the_window_chrome():
     visible bottom bar rather than behind a navigation step. It must also go
     through ensure_download_dir() before being stored, so the bottom bar can
     never display a folder that download time would reject.
+
+    The bottom bar is the ONE place the folder is chosen. Settings used to
+    carry a second copy of the same control, and two controls for one
+    value means two places to change it and one of them can be a step out
+    of date. This test now pins that the duplicate is gone, not that it
+    exists -- so the folder cannot drift back into Settings by accident.
     """
     src = (SRC / "gui.py").read_text(encoding="utf-8")
     assert "_pick_download_dir" in src, "no download-folder picker is wired up"
     assert "dl_bar" in src, "no bottom download-location bar"
-    # Slice up to the assignment regardless of which builder constructs it
-    # (it is _bar(...) now, not ft.Container(...)); the invariant is the
-    # validation, not the widget class.
-    body = src[src.index("async def _pick_download_dir"):
-               src.index("dl_bar = ")]
-    assert "ensure_download_dir(st)" in body, (
+
+    tree = ast.parse(src)
+    helper = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "pick_download_dir"):
+            helper = ast.get_source_segment(src, node)
+            break
+    assert helper, (
+        "the folder picker is not a shared helper; the bottom bar and the "
+        "Settings row can drift apart")
+
+    validate_at = helper.find("ensure_download_dir(st)")
+    save_at = helper.find("save_settings(st)")
+    assert validate_at != -1, (
         "the picker must validate the folder before saving it")
-    assert "get_directory_path" in body, "must use a real folder picker"
+    assert save_at != -1, "the picker never saves the folder it picked"
+    assert validate_at < save_at, (
+        "the folder must be validated BEFORE it is stored, not after")
+    assert "get_directory_path" in helper, "must use a real folder picker"
+
+    # The bottom bar is the caller.
+    assert "await pick_download_dir(page)" in src, (
+        "the bottom bar must use the shared picker")
+
+    # ...and Settings must NOT offer a second one. The folder path is
+    # displayed in the bottom bar, so a copy in Settings is a duplicate
+    # control, not a convenience.
+    assert "on_change_folder" not in src, (
+        "Settings offers its own folder picker again; the bottom bar is "
+        "the one place the download folder is chosen")
+    assert "_heading(\"Downloads\")" not in src, (
+        "the Downloads section is back in Settings; the folder belongs in "
+        "the bottom bar only")
+    assert "folder_txt" not in src, (
+        "a folder path control still lives in Settings; the bottom bar "
+        "shows the path")
 
 
 def test_gui_add_flow_is_reachable():
@@ -214,6 +246,52 @@ def test_the_queue_worker_names_files_from_the_fetched_message():
     assert "auto_title_from_message(msg, chat)" in text, (
         "the worker no longer derives the filename from the message it "
         "fetches; files will be saved as msg-<id>")
+
+
+def test_the_in_app_updater_has_a_button():
+    """The updater must be reachable from the GUI, not just present in it.
+
+    The v1.3.1 rewrite kept every part of the update flow -- the network
+    check, the "update available" dialog, the verified download, the
+    pkexec install -- and dropped the ONE thing that started it: the
+    button. The app imported fine, every test still passed, and the
+    feature was simply gone from the UI.
+
+    Nothing in the suite imports gui.py, so a missing affordance cannot
+    fail a functional test. It has to be pinned structurally, the same
+    way a missing page or a missing nav destination is.
+    """
+    src = (SRC / "gui.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    handlers = [n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "on_check_updates"]
+    assert handlers, "the update-check handler is gone entirely"
+
+    # The handler must be passed to a control factory ALONGSIDE a label the
+    # user can read. A handler that exists but is never handed to a button
+    # is dead code wearing a feature's clothes.
+    wired = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        labels = {a.value.lower() for a in node.args
+                  if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+        names = {a.id for a in node.args if isinstance(a, ast.Name)}
+        if "on_check_updates" in names and \
+                any("check for update" in label for label in labels):
+            wired = True
+            break
+    assert wired, (
+        "the update check has no button: on_check_updates exists but "
+        "nothing calls it, so the app cannot check for updates at all")
+
+    # The dialog it opens is the one that offers Later / Open page /
+    # Download -- the three actions the README promises.
+    assert "update_dialog" in src, "the update dialog is gone"
+    assert "Download Installer" in src, (
+        "the update dialog no longer offers the installer download")
 
 
 def test_title_bar_uses_the_packaged_app_logo():
@@ -423,25 +501,62 @@ def test_theme_comes_from_the_ui_module_not_inline_colours():
     ), ("a PALETTES dict is back in gui.py; colour must have one home")
 
 
-def test_cards_are_only_for_list_items_and_named_cards():
-    """section() must be gone and group() must be bare unless asked.
+def _view_source(src, name):
+    """The source of one view builder, so a test can assert what is INSIDE
+    a specific page rather than anywhere in the file."""
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == name):
+            return ast.get_source_segment(src, node)
+    return None
+
+
+def test_sections_are_labelled_stacks_not_cards():
+    """section()/group() stay gone; page sections are labelled bare stacks.
 
     Wrapping every Settings group in its own bordered card was the reason the
-    GUI read as broken: three or four full-width boxes of equal weight, each
-    with its own title and hairline, so nothing had a clear primary area. The
-    reference allows cards only for list rows and the path bar.
+    GUI read as broken: several full-width boxes of equal weight, each with
+    its own title and hairline, so nothing had a clear primary area. The
+    rebuilt shell composes each section as a ui.stack() run introduced by a
+    section heading (_heading() over ui.section_label); raised material is
+    reserved for ui.list_row and the window bars.
     """
     text = GUI_PY.read_text(encoding="utf-8")
     assert "def section(" not in text, (
-        "section() is back; it is the card-soup helper that was replaced by "
-        "group().")
-    assert "def group(" in text
-    # group() must return a bare Column unless card=True
-    m = re.search(r"def group\(.*?\n    def ", text, re.S)
-    assert m, "could not locate group()"
-    body = m.group(0)
-    assert "if not card:" in body and "return col" in body, (
-        "group() is not bare by default")
+        "section() is back; it is the card-soup helper the redesign deleted.")
+    assert "def group(" not in text, (
+        "group() is back; sections are bare labelled stacks now, not "
+        "grouped/boxed cards.")
+    assert "ui.card(" not in text, "cards belong to ui.list_row / ui.bar"
+
+    # Each section introduces its stack with its own heading. The assertion
+    # is scoped to the Settings VIEW, not to the whole file, so a control
+    # that moves to another page is a visible diff here rather than a
+    # silent relocation.
+    settings = _view_source(text, "settings_view")
+    assert settings, "settings_view is gone"
+    for label in ("Dependencies", "About", "Danger zone"):
+        assert f'_heading("{label}")' in settings, (
+            f"the {label!r} section lost its heading helper")
+
+    # The download-folder section does not belong in Settings: the bottom
+    # bar is always on screen and already owns the folder.
+    assert 'heading("Downloads")' not in settings, (
+        "the Downloads section is back in Settings; the download folder "
+        "is chosen from the bottom bar, which is always visible")
+
+    # Nor does the output mode: it is a property of the links being
+    # added, so it is chosen on the Add page, next to them.
+    assert 'heading("Output mode")' not in settings, (
+        "the output mode is back in Settings; it belongs on the Add page, "
+        "next to the links it applies to")
+    add_view = _view_source(text, "downloads_view")
+    assert add_view, "downloads_view is gone"
+    assert '_heading("Output mode")' in add_view, (
+        "the Add page lost the output-mode control; the mode decides what "
+        "happens to the files the user is adding")
+    assert "mode_toggle_slot" in add_view, (
+        "the Add page's output-mode control is not a toggle any more")
 
 
 def _own_scope_bindings(fn):

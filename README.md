@@ -21,12 +21,12 @@
 
 - **Single or batch links** — paste one or many `t.me` URLs, or load a `.txt` batch file.
 - **Preview before download** — fetch titles and sizes first, confirm, then download.
-- **First-run setup** — API ID/hash asked once, editable later in Settings or `tg-dl config`.
+- **First-run setup** — API ID/hash asked once, editable later in Account auth or `tg-dl config`.
 - **Dependency checker** — built-in page (`tg-dl deps`) shows what's installed plus the exact install command for your OS.
 - **Queue with resume-all** — progress persists in `queue.json`; interrupted downloads resume from partial files.
 - **MP4 conversion** — Original (fastest) · Fast (veryfast CRF28) · Max (medium CRF28) via ffmpeg.
 - **In-app updates** — checks GitHub releases, with Later / Open page / Download actions.
-- **Dark theme** — dark by default, switchable in Settings.
+- **Dark theme** — dark by default, switchable from the toggle in the top bar.
 
 ## Install
 
@@ -68,14 +68,16 @@ privately with `0600` permissions.
 
 Four destinations, dark-first Material 3 design:
 
-- **Add** — paste links (or load `.txt`), pick Original / Fast / Max, fetch titles,
-  tick or edit them, confirm and download. Limits: max 100 URLs per run, batch
-  files max 256 KB.
-- **Queue** — live progress with speed/ETA, retry/remove per item, Resume all / Start,
+- **Add** — paste links (or load `.txt`), pick Original / Fast / Max, press Add: the
+  links go straight to the queue. Limits: max 100 URLs per run, batch files max 256 KB.
+- **Ongoing** — live progress with speed/ETA, retry/remove per item, Resume all / Start,
   cancel batch (partials are kept).
-- **Settings** — Connection (API ID/hash, folder, login/logout), download defaults,
-  appearance, About with update checker.
-- **Deps** — dependency install status with copy-paste commands.
+- **Account auth** — API ID/hash and the Telegram login (sign in, sign out).
+- **Settings** — Dependencies (install status with copy-paste commands), About with the
+  update checker, and the danger zone.
+
+The download folder is changed from the bar along the bottom of the window, and the
+theme is switched from the toggle in the top bar.
 
 Supported links:
 
@@ -115,7 +117,7 @@ src/telegram_downloader/
   updates.py         GitHub-release update checker (stdlib only)
   queue_store.py     queue.json persistence (0600)
   cli.py             tg-dl command
-  gui.py             Flet GUI (top tabs: Add / Queue / Settings)
+  gui.py             Flet GUI (top tabs: Add / Ongoing / Account auth / Settings)
 tests/               pytest, no network required
 scripts/             install-deps.sh, build-deb.sh, build-apk.sh
 ```
@@ -143,7 +145,7 @@ Version source of truth: `__version__` in
 | `externally-managed-environment` | Use a venv (`python3 -m venv .venv`) or run `scripts/install-deps.sh` |
 | Phone invalid | Use full international format, e.g. `+8801XXXXXXXXX` (typed blind — input is hidden, type carefully) |
 | Login every run | Finish one login; check `~/.config/telegram-downloader/session.session` exists; `tg-dl config logout` then log in again |
-| Transfer timeout / resume | Keep the partial file; rerun or Queue → Resume all / Start (backoff + reconnect built in) |
+| Transfer timeout / resume | Keep the partial file; rerun or Ongoing → Resume all / Start (backoff + reconnect built in) |
 | ffmpeg missing | Mode 1 works without it; check Settings > Dependencies for the exact install command, or run `scripts/install-deps.sh` |
 | Private channel / not found | The same account must be able to open the link in Telegram; check thread vs message id order |
 | GUI won't start | `pip install -e ".[gui]"`, then `tg-dl gui`; see `tg-dl deps` |
