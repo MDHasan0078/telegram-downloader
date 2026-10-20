@@ -70,3 +70,33 @@ project_name = "Telegram Downloader"
 product_name = "Telegram Downloader"
 org = "com.tgdownloader"
 company = "tgdownloader"
+
+# Merged into the generated Flutter project's pubspec.yaml by `flet build`
+# (flet_cli/commands/build_base.py, "tool.flet.flutter.pubspec").
+#
+# jni is pinned HERE, not in Flet's template, because the template's pin is
+# stale and the .apk build cannot compile against it any more:
+#
+#   Flet's Flutter template was published 2026-08-01, when the only jni on
+#   pub.dev was 1.0.x, so it pins jni 1.0.0. Since then jni 1.1.0 landed
+#   (2026-10-01) and the packages that generate JNI bindings moved with it:
+#   jni_flutter 1.0.4+1 (2026-10-06) and shared_preferences_android 2.5.1
+#   (2026-10-19) both declare jni ^1.1.0. Their generated bindings carry a
+#   compile-time const assertion -- `const _$jniVersionCheck =
+#   JniVersionCheck(1, 1)` -- which fails to evaluate when jni 1.0.x is
+#   imported, so the Dart compile dies with:
+#
+#     generated bindings expect package:jni ^1.1.0, but 1.0.x was imported
+#     Target kernel_snapshot_program failed
+#
+# The override in this file REPLACES the template's, because flet merges it
+# with `pubspec.setdefault("dependency_overrides", {}).update(...)` -- the
+# last writer for a key wins, and this is the last writer.
+#
+# jni 1.1.0 resolves on the runner's Dart (>= 3.12.0): package_config 3.0.0
+# needs ^3.11.0, collection 1.19.1 needs ^3.4.0, jni_util 1.0.0 and ffi
+# 2.1.3 need >= 3.3.0. If a future jni release moves the bindings again,
+# this pin has to move with them -- and the failure will look exactly like
+# the one above.
+[tool.flet.flutter.pubspec.dependency_overrides]
+jni = "1.1.0"

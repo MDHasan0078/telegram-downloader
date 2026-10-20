@@ -13,12 +13,51 @@ import base64
 import builtins
 import pathlib
 import re
+import tomllib
 
 import telegram_downloader.updates as upd
 from telegram_downloader.gui import app_logo_src
 
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "telegram_downloader"
+REPO = pathlib.Path(__file__).resolve().parent.parent
 TERMINAL = (ast.Raise, ast.Return)
+
+
+def test_the_apk_pins_a_jni_the_generated_bindings_can_compile_against():
+    """The .apk build's Dart dependency on jni is pinned HERE, on purpose.
+
+    Flet's Flutter template pins jni 1.0.0 because it was published on
+    2026-08-01, when 1.0.x was all that existed on pub.dev. jni 1.1.0
+    landed on 2026-10-01 and the packages that generate JNI bindings
+    moved with it: jni_flutter 1.0.4+1 and shared_preferences_android
+    2.5.1 both declare jni ^1.1.0, and their generated bindings carry a
+    compile-time const assertion that fails to evaluate against 1.0.x.
+
+    The result was an .apk build that died in the Dart compile with
+    "generated bindings expect package:jni ^1.1.0, but 1.0.x was
+    imported" -- while the .deb, which is what actually ships, kept
+    building fine, so the failure was easy to mistake for something else.
+
+    This override is merged into the generated pubspec by `flet build`
+    and it REPLACES the template's pin, because flet merges with
+    setdefault+update and the last writer for a key wins. Remove it and
+    the .apk breaks again; if a future jni release moves the bindings
+    again, this pin has to move with them.
+    """
+    pkg = tomllib.loads(
+        (REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    overrides = (pkg.get("tool", {}).get("flet", {})
+                 .get("flutter", {}).get("pubspec", {})
+                 .get("dependency_overrides", {}))
+    assert "jni" in overrides, (
+        "the jni pin is gone from pyproject.toml; the .apk build will "
+        "resolve jni 1.0.x from Flet's stale template and fail to "
+        "compile the generated JNI bindings")
+    pinned = overrides["jni"]
+    major, minor = (int(p) for p in pinned.split(".")[:2])
+    assert (major, minor) >= (1, 1), (
+        f"jni is pinned to {pinned}; the generated bindings need jni "
+        "^1.1.0 or newer")
 
 
 def _dead_after_terminal(path):
