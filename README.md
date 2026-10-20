@@ -1,7 +1,7 @@
 # Telegram Downloader
 
 <p align="center">
-  <img src="assets/icon.svg" width="96" alt="Telegram Downloader icon">
+  <img src="src/telegram_downloader/assets/icon.svg" width="96" alt="Telegram Downloader icon">
 </p>
 
 <p align="center">
@@ -15,18 +15,46 @@
   <img src="https://img.shields.io/python-%3E%3D3.10/license-MIT-green" alt="MIT license">
 </p>
 
----
+<p align="center">
+  <img src="docs/hero.png" alt="Telegram Downloader — the Add tab" width="900">
+</p>
 
-## Features
+One window, four destinations. **Add** the links, **Ongoing** to watch them land,
+**Account auth** for your API credentials and the Telegram login, **Settings** for
+dependencies, updates and the danger zone. The download folder lives in the bar along
+the bottom of the window, so it can be changed from anywhere. The same engine runs
+headless from the CLI.
+
+## What it does
 
 - **Single or batch links** — paste one or many `t.me` URLs, or load a `.txt` batch file.
-- **Preview before download** — fetch titles and sizes first, confirm, then download.
-- **First-run setup** — API ID/hash asked once, editable later in Account auth or `tg-dl config`.
-- **Dependency checker** — built-in page (`tg-dl deps`) shows what's installed plus the exact install command for your OS.
-- **Queue with resume-all** — progress persists in `queue.json`; interrupted downloads resume from partial files.
-- **MP4 conversion** — Original (fastest) · Fast (veryfast CRF28) · Max (medium CRF28) via ffmpeg.
-- **In-app updates** — checks GitHub releases, with Later / Open page / Download actions.
+- **A queue that survives a restart** — progress lives in `queue.json`, and an interrupted
+  download resumes from its partial file.
+- **Persistent login** — sign in once; the session is reused on every later run.
+- **MP4 conversion** — Original (no re-encode) · Fast · Max via ffmpeg, chosen per download
+  on the Add tab.
+- **A dependency checker** — what is installed and the exact install command for your OS.
+- **In-app updates** — *Check for updates* in Settings, with Later / Open page / Download.
 - **Dark theme** — dark by default, switchable from the toggle in the top bar.
+- **Preview before download (CLI only)** — `tg-dl preview` lists titles and sizes, and
+  `tg-dl download` asks before it starts. The GUI goes straight to the queue.
+
+## Quick start
+
+```bash
+git clone https://github.com/MDHasan0078/telegram-downloader
+cd telegram-downloader
+./scripts/install-deps.sh --gui --speed   # python, ffmpeg, pip package
+tg-dl gui                                # launch the desktop GUI
+```
+
+Already have a release? `sudo apt install ./telegram-downloader_<version>_amd64.deb`,
+then `tg-dl gui`.
+
+The first launch asks for your **API ID + API hash** — get them at
+[my.telegram.org](https://my.telegram.org) → API development tools — and for your
+Telegram login. Downloads land in `~/Downloads/Telegram`; change the folder from the bar
+along the bottom of the window. Credentials are stored privately with `0600` permissions.
 
 ## Install
 
@@ -50,11 +78,6 @@ tg-dl deps                                # verify everything is installed
 tg-dl gui                                 # launch the desktop GUI
 ```
 
-First run asks for your **API ID + API hash** (get them at
-[my.telegram.org](https://my.telegram.org) → API development tools) and a
-**download folder** (default `~/Downloads/Telegram`). Credentials are stored
-privately with `0600` permissions.
-
 | Platform | Notes |
 |---|---|
 | Debian / Ubuntu | Install the release `.deb` as shown above, or `./scripts/build-deb.sh` → `dist/*.deb` |
@@ -62,22 +85,49 @@ privately with `0600` permissions.
 | macOS | From source only: `brew install python ffmpeg`, then the same pip steps |
 | Android / Termux | `pkg install python ffmpeg`, then `pip install -e ".[gui]"` |
 
-## Usage
+## The GUI
 
-### GUI
+Dark-first Material 3, with one accent colour that means *action* and nothing else.
+The top bar is the navigation — the brand, the two primary destinations, the theme
+toggle, then the two settings-side destinations. The bottom bar is the download folder.
 
-Four destinations, dark-first Material 3 design:
+### Add
 
-- **Add** — paste links (or load `.txt`), pick Original / Fast / Max, press Add: the
-  links go straight to the queue. Limits: max 100 URLs per run, batch files max 256 KB.
-- **Ongoing** — live progress with speed/ETA, retry/remove per item, Resume all / Start,
-  cancel batch (partials are kept).
-- **Account auth** — API ID/hash and the Telegram login (sign in, sign out).
-- **Settings** — Dependencies (install status with copy-paste commands), About with the
-  update checker, and the danger zone.
+<p align="center">
+  <img src="docs/add.png" alt="The Add tab" width="820">
+</p>
 
-The download folder is changed from the bar along the bottom of the window, and the
-theme is switched from the toggle in the top bar.
+Paste one or many `t.me` links (or load a `.txt` file), pick the **output mode**, and
+press Add — the links go straight into the queue, no preview step. A `.txt` batch file
+is capped at 256 KB.
+
+### Ongoing
+
+<p align="center">
+  <img src="docs/ongoing.png" alt="The Ongoing tab" width="820">
+</p>
+
+Live progress with speed and ETA, retry or remove per item, Resume all / Start, cancel
+the batch. Partial files are kept, so an interrupted download resumes where it stopped.
+
+### Account auth
+
+<p align="center">
+  <img src="docs/account-auth.png" alt="The Account auth tab" width="820">
+</p>
+
+Your API ID and hash, and the Telegram login itself — sign in, sign out. This is where
+the credentials live; they are stored with `0600` permissions and never leave the machine.
+
+### Settings
+
+<p align="center">
+  <img src="docs/settings.png" alt="The Settings tab" width="820">
+</p>
+
+**Dependencies** (what is installed, and the exact command to fix it), **About** (version,
+engine, ffmpeg, and a *Check for updates* button), and the **danger zone** (sign out,
+delete the saved credentials, empty the queue).
 
 Supported links:
 
@@ -88,7 +138,24 @@ https://t.me/c/1234567890/123
 https://t.me/c/1234567890/244/264
 ```
 
-### CLI
+## Configuration
+
+Everything the app needs is in one place, and the app tells you where:
+
+| What | Where it lives |
+|---|---|
+| API ID + API hash | **Account auth** tab, or `tg-dl config` |
+| Telegram login | **Account auth** → Verify / Login, or `tg-dl config login` |
+| Download folder | the bar along the **bottom** of the window, or `tg-dl config set download_dir=…` |
+| Output mode (Original / Fast / Max) | the **Add** tab, next to the links it applies to, or `tg-dl config set output_mode=2` |
+| Theme | the toggle in the **top bar** |
+| The queue | `queue.json` in the config directory — it survives a restart |
+
+The config directory is `~/.config/telegram-downloader/` (mode `0700`); the config file
+and the Telegram session are `0600`. `tg-dl config show` prints the current settings,
+`tg-dl config path` prints the directory, and `tg-dl config reset` puts everything back.
+
+## CLI
 
 ```bash
 tg-dl gui                                   # launch GUI
@@ -120,6 +187,7 @@ src/telegram_downloader/
   gui.py             Flet GUI (top tabs: Add / Ongoing / Account auth / Settings)
 tests/               pytest, no network required
 scripts/             install-deps.sh, build-deb.sh, build-apk.sh
+docs/                the screenshots used by this README
 ```
 
 ## Releases
@@ -134,9 +202,11 @@ release, so some releases carry the `.deb` alone. Artifacts are attached to the
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-Version source of truth: `__version__` in
-`src/telegram_downloader/__init__.py` plus the `version =` line in
-`pyproject.toml` (CI stamps both from the tag for release builds).
+Version source of truth: `__version__` in `src/telegram_downloader/__init__.py` **and**
+the `version =` line in `pyproject.toml` must declare the *same* version — bump both in
+the same commit. A test asserts they agree, because a checkout installed from a stale
+`pyproject.toml` reports the wrong version and the updater then nags about a release
+you are already running. CI stamps both files from the release tag.
 
 ## Troubleshooting
 
