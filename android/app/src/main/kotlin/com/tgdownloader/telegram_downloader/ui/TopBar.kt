@@ -80,7 +80,11 @@ fun TgTopBar(
         val x = chipOffsets[selected.key] ?: return@LaunchedEffect
         val w = chipWidths[selected.key] ?: 0
         if (x < scroll.value || x + w > scroll.value + viewport) {
-            scroll.animateScrollTo(x)
+            // ScrollState.animateScrollTo takes an Int in this Compose
+            // version -- it is `animateScrollTo(value: Int, ...)`, and the
+            // Float overload is not there. The offset is a Float because
+            // positionInParent().x is, so it is truncated here.
+            scroll.animateScrollTo(x.toInt())
         }
     }
 
