@@ -742,11 +742,12 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           echo "publishing:"; sed -n '/^assets<</,/^EOF$/p' "$GITHUB_OUTPUT"
-      # Idempotency. `overwrite: true` replaces assets of the same name, but a
-      # re-run that fails halfway leaves the release holding a mix of old and
-      # new files. Delete every asset we are about to publish FIRST, so a
-      # failure mid-attach leaves a release that is visibly incomplete rather
-      # than quietly wrong.
+      # Idempotency comes from the "Remove superseded release assets" step
+      # above, which deletes every asset we are about to publish FIRST: a
+      # re-run that fails halfway then leaves the release visibly incomplete
+      # rather than quietly holding a mix of old and new files. The action's
+      # own `overwrite_files` is not needed for that, and `overwrite` is not
+      # an input the action declares at all -- it was silently ignored.
       - name: Remove superseded release assets
         env:
           GH_REPO: ${{ github.repository }}
@@ -772,5 +773,4 @@ jobs:
           tag_name: "${{ github.ref_name }}"
           generate_release_notes: true
           fail_on_unmatched_files: true
-          overwrite: true
           files: ${{ steps.assets.outputs.assets }}
