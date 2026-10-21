@@ -20,6 +20,7 @@ desktop.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -225,6 +226,25 @@ try:
 except Exception as exc:
     check("the progress dialog opens", False, f"{exc!r}")
 check("the progress dialog was on screen",
+      any(was_seen(d) for d in CREATED[before:]))
+
+# -- 7. the whole "press the button" path ------------------------------------
+# The dialog opening is not the same as the BUTTON working. The check
+# runs the real handler -- the one the "Check for updates" button is
+# wired to -- and waits for the dialog it is supposed to produce.
+before = len(CREATED)
+answer_dialogs()
+try:
+    asyncio.run(view._on_check_updates())
+except Exception as exc:
+    check("the update check reaches a dialog", False, f"{exc!r}")
+# The handler runs on the engine's loop and hands the dialog to the GTK
+# thread, so the main context has to be given a chance to run it.
+for _ in range(200):
+    if any(was_seen(d) for d in CREATED[before:]):
+        break
+    GLib.MainContext.default().iteration(True)
+check("the update check reaches a dialog",
       any(was_seen(d) for d in CREATED[before:]))
 
 print()
