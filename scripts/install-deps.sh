@@ -38,11 +38,28 @@ elif [ "$(uname -s)" = "Darwin" ]; then
 elif have apt-get; then
   echo "==> Debian/Ubuntu detected"
   sudo apt update
+  # python3-gi + gir1.2-gtk-4.0 are the GUI: the desktop app is native
+  # GTK4 and the widgets come from the distro, so there is no client to
+  # download and nothing to reach for at startup.
   sudo apt install -y python3 python3-venv python3-pip ffmpeg
+  if [ "$GUI" = "1" ]; then
+    if ! sudo apt install -y python3-gi gir1.2-gtk-4.0 adwaita-icon-theme \
+         xdg-utils; then
+      echo "install-deps.sh: the GTK4 packages failed to install." >&2
+      echo "  The CLI still works; the GUI needs them." >&2
+    fi
+  fi
 elif have dnf; then
   sudo dnf install -y python3 ffmpeg
+  if [ "$GUI" = "1" ]; then
+    sudo dnf install -y python3-gi gtk4 adwaita-icon-theme xdg-utils || true
+  fi
 elif have pacman; then
   sudo pacman -Sy --noconfirm python ffmpeg
+  if [ "$GUI" = "1" ]; then
+    sudo pacman -S --noconfirm python-gobject gtk4 adwaita-icon-theme xdg-utils \
+      || true
+  fi
 else
   echo "Unknown OS — install Python 3.10+ and ffmpeg manually."
 fi

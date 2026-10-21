@@ -81,15 +81,19 @@ tg-dl gui                                 # launch the desktop GUI
 | Platform | Notes |
 |---|---|
 | Debian / Ubuntu | Install the release `.deb` as shown above, or `./scripts/build-deb.sh` → `dist/*.deb` |
-| Other Linux | `./scripts/install-deps.sh --gui --speed`, then `pip install -e ".[gui]"` |
+| Other Linux | `sudo apt install python3-gi gir1.2-gtk-4.0` (the GUI is GTK4), then `./scripts/install-deps.sh --gui --speed` and `pip install -e ".[gui]"` |
 | macOS | From source only: `brew install python ffmpeg`, then the same pip steps |
 | Android / Termux | `pkg install python ffmpeg`, then `pip install -e ".[gui]"` |
 
 ## The GUI
 
-Dark-first Material 3, with one accent colour that means *action* and nothing else.
+Dark-first, with one accent colour that means *action* and nothing else.
 The top bar is the navigation — the brand, the two primary destinations, the theme
 toggle, then the two settings-side destinations. The bottom bar is the download folder.
+
+The Linux app is **native GTK4** — the widgets come from your distribution
+(`python3-gi`, `gir1.2-gtk-4.0`), so there is no client to download and nothing
+to reach for at startup. The screenshots below are the real app.
 
 ### Add
 
@@ -184,7 +188,8 @@ src/telegram_downloader/
   updates.py         GitHub-release update checker (stdlib only)
   queue_store.py     queue.json persistence (0600)
   cli.py             tg-dl command
-  gui.py             Flet GUI (top tabs: Add / Ongoing / Account auth / Settings)
+  gui.py             Flet GUI (headless / HTTP serve; the desktop app is gtk/)
+  gtk/              GTK4 GUI — the native desktop app
 tests/               pytest, no network required
 scripts/             install-deps.sh, build-deb.sh, build-apk.sh
 docs/                the screenshots used by this README
