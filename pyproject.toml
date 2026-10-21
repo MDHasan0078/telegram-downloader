@@ -100,3 +100,23 @@ company = "tgdownloader"
 # the one above.
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni = "1.1.0"
+
+# Per-platform pip dependencies for `flet build` (flet_cli reads
+# `tool.flet.<platform>.dependencies` and appends them to the list it hands
+# serious_python, which installs them into the artifact's Python closure).
+#
+# flet is an EXTRA here, and extras are not what `flet build` resolves: it
+# installs `[project].dependencies`, which is telethon alone. So the published
+# APK shipped a Python runtime with pyaes, pyasn1, rsa and telethon in it and
+# NO flet -- and gui.py's `import flet` therefore died on the first line of
+# the Android app, which the Flutter side renders as a red error screen.
+#
+# The .deb never had this problem: its runtime lock is the `gui` extra plus
+# telethon, so flet is present. This is the APK's half of the same closure.
+#
+# The list form is required: flet_cli reads the value and iterates it as a
+# list of requirement strings. A mapping here is iterated as its KEYS, which
+# silently drops the version pin and leaves a bare "flet".
+[tool.flet.android]
+dependencies = ["flet==0.86.5"]
+

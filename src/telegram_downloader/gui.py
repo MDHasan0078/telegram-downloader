@@ -110,12 +110,14 @@ def _page_service(page, cls):
     """Return a page-level flet *Service*, created once per page.
 
     In flet 0.86 `ft.FilePicker` (and friends) derive from `Service`, not from
-    the visual `Control` tree. `Service.init()` self-registers under
-    `Page._services`, so it must be mounted on the page -- putting it in
-    `page.overlay` also tells the Flutter client to render it as a visual,
-    which produces a full-height `Unknown control: FilePicker` error stripe
-    and a picker that never opens. Caching per page avoids re-registering on
-    every click.
+    the visual `Control` tree. A service belongs on `page.services` -- the
+    list the root view carries so the client can build the service binding.
+
+    `page.add(svc)` is the trap: it registers the service AND puts it in the
+    visual tree, so the Flutter client tries to render it as a widget and
+    answers with a full-height "Unknown control: FilePicker" error stripe
+    while the picker itself never opens. Caching per page avoids
+    re-registering on every click.
     """
     cache = getattr(page, "_flet_services", None)
     if cache is None:
@@ -128,7 +130,11 @@ def _page_service(page, cls):
     if svc is None:
         svc = cls()
         cache[cls] = svc
-        page.add(svc)
+        page.services.append(svc)
+        try:
+            page.update()
+        except Exception:
+            pass
     return svc
 
 
@@ -239,22 +245,31 @@ def run_gui(port=None, view=None):
                 pass
         return c
 
-    # page id -> SnackBar (flet 0.86 has no page.snack_bar)
-    _snackbars: dict = {}
-
     def snack(page, msg: str, error: bool = False):
-        # Surface fill and shape come from ui.theme()'s snackbar_theme; only
-        # the text colour distinguishes a failure from a confirmation.
+        """Show a transient message at the bottom of the window.
+
+        flet 0.86 made SnackBar a DialogControl: it is shown with
+        page.show_dialog(), NOT by appending it to page.overlay and
+        setting open=True. The old pattern still hands the control to the
+        client and still "succeeds" -- there is no exception, no error,
+        nothing in the log -- so it fails SILENTLY and the message is
+        never rendered.
+
+        That is why pressing "Check for updates" appeared to do nothing
+        at all: every path through the updater reports its result through
+        this function, so the button spun, the network call completed, and
+        the answer was never displayed. An AlertDialog still works from
+        page.overlay (the client renders it as a plain dialog); a
+        SnackBar does not, because it needs the dialog stack to get the
+        snackbar treatment.
+
+        Surface fill and shape come from ui.theme()'s snackbar_theme; only
+        the text colour distinguishes a failure from a confirmation.
+        """
         try:
-            sb = _snackbars.get(id(page))
-            if sb is None:
-                sb = ft.SnackBar(ui.text(""))
-                _snackbars[id(page)] = sb
-                page.overlay.append(sb)
-            sb.content = ui.text(msg, color=(ft.Colors.ERROR if error
-                                             else ft.Colors.TERTIARY))
-            sb.open = True
-            page.update()
+            sb = ft.SnackBar(ui.text(msg, color=(ft.Colors.ERROR if error
+                                             else ft.Colors.TERTIARY)))
+            page.show_dialog(sb)
         except Exception:
             pass
 

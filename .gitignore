@@ -58,3 +58,6 @@ release-signing.key.pem
 # --require-hashes, so those files are the end user's entire trust root. If
 # either ever stops being committed, the .deb build must fail loudly (see the
 # completeness checks in scripts/build-deb.sh) rather than fall back to PyPI.
+
+# flet build apk stages a trimmed copy of the app here (scripts/build-apk.sh)
+.apk-stage/

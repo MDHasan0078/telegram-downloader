@@ -158,11 +158,48 @@ export PIP_FIND_LINKS="$PWD/wheels"
 export PIP_NO_BUILD_ISOLATION=0
 export PIP_REQUIRE_VIRTUALENV=false
 
+# ------------------------------------------------------- stage a lean app dir
+# `flet build apk` copies the whole python_app_path into the APK as
+# app.zip, and the default app path is the repository root. That shipped
+# the entire git history (2.6 MB of .git/), the Linux x86_64 wheel set
+# (2.3 MB, useless on Android), the test suite and the screenshot folder
+# -- 5.3 MB of the APK that no phone could use.
+#
+# Only the app itself is staged: the entry point, the package, the
+# pyproject that carries [tool.flet], and the licence. PIP_FIND_LINKS
+# above still points at the real wheels/ directory, so the pyaes wheel
+# that serious_python needs is still found.
+STAGE="$PWD/.apk-stage"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp main.py pyproject.toml LICENSE "$STAGE/"
+cp -r src "$STAGE/src"
+rm -rf "$STAGE"/src/*.egg-info
+find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+echo "==> staged app dir: $(du -sh "$STAGE" | cut -f1) (the repo root is $(du -sh . | cut -f1))"
+
+# ------------------------------------------------------------- one ABI only
+# The APK shipped three ABIs: arm64-v8a (every phone from 2017 on),
+# x86_64 (emulators only) and armeabi-v7a (32-bit phones). The other two
+# were 80.6 MB of the 153 MB, and they are dead weight on a device that
+# can only ever run one of them.
+#
+# arm64-v8a is the only ABI that matters for a phone. An x86_64 build is
+# still wanted for the emulator, so it is a separate, opt-in artifact
+# rather than a third copy inside the one people download.
+APK_ARCH="${APK_ARCH:-arm64-v8a}"
+
+# --output-dir puts the artifact back at build/apk, where the rest of this
+# script expects it, even though the app path is now the staged copy.
 if [ "${1:-}" = "--debug" ]; then
-  flet build apk --project telegram_downloader.gui --module-name main --flutter-build-args=--debug --yes
+  flet build apk "$STAGE" --project telegram_downloader.gui --module-name main \
+    --arch "$APK_ARCH" --output-dir "$PWD/build/apk" \
+    --flutter-build-args=--debug --yes
 else
-  flet build apk --project telegram_downloader.gui --module-name main --yes
+  flet build apk "$STAGE" --project telegram_downloader.gui --module-name main \
+    --arch "$APK_ARCH" --output-dir "$PWD/build/apk" --yes
 fi
+rm -rf "$STAGE"
 
 # --------------------------------------------- move artifacts out of build/
 # Flet leaves its output in build/apk. Copy it into dist/ and delete build/ so
