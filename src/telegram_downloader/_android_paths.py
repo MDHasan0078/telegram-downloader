@@ -84,13 +84,28 @@ def point_config_at_writable_storage() -> str | None:
     symlink, owned by the user, and not world- or group-writable. The
     directory is created 0700 here so those checks pass.
 
+    The candidate is RESOLVED first, and that matters more than it looks.
+    On Android the app's own storage is reached through
+    /data/user/0/<package>/files, and /data/user/0 is a SYMLINK to
+    /data/data. config.py walks every parent of the config dir and
+    refuses the lot if any of them is a symlink, so the unresolved path
+    is rejected with:
+
+        RuntimeError: Refusing config dir traversing a symlink:
+        /data/user/0/.../files/flet/app/src/xdg/telegram-downloader
+
+    Resolving turns that into /data/data/<package>/files/..., which has
+    no symlinked component, and it is the same directory on disk.
+
     Returns the directory it chose, or None if nothing was writable --
     in which case config.py's own (loud) refusal is left to speak.
     """
     for candidate in writable_dirs():
         try:
-            base = Path(candidate)
-        except (TypeError, ValueError):
+            # resolve() is what removes the /data/user/0 -> /data/data
+            # symlink from the chain config.py checks.
+            base = Path(candidate).resolve()
+        except (OSError, RuntimeError, TypeError, ValueError):
             continue
         if not _is_writable(base):
             continue

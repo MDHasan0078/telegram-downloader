@@ -113,6 +113,39 @@ def test_it_skips_something_that_is_not_a_directory(tmp_path, monkeypatch):
     assert str(good) in chosen
 
 
+def test_it_resolves_a_symlinked_parent(tmp_path, monkeypatch):
+    """The chosen path must have NO symlinked component, because config.py
+    walks every parent of the config dir and refuses the lot if any of them
+    is a symlink.
+
+    On Android the app's own storage is reached through
+    /data/user/0/<package>/files, and /data/user/0 is a symlink to
+    /data/data. The unresolved path is rejected with "Refusing config dir
+    traversing a symlink", so the candidate has to be resolved first.
+    """
+    real = tmp_path / "data"
+    (real / "pkg" / "files").mkdir(parents=True)
+    linked = tmp_path / "user"
+    linked.symlink_to(real, target_is_directory=True)
+
+    monkeypatch.setattr(_android_paths, "writable_dirs",
+                        lambda: [str(linked / "pkg" / "files")])
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    chosen = _android_paths.point_config_at_writable_storage()
+
+    assert chosen is not None
+    resolved = pathlib.Path(chosen).resolve()
+    # Every component of the chosen path exists, and none of them is a
+    # symlink -- which is exactly what config.py checks.
+    cur = resolved
+    while cur != cur.parent:
+        assert not cur.is_symlink(), f"{cur} is a symlink"
+        cur = cur.parent
+    assert str(linked) not in chosen, (
+        "the chosen path still goes through the symlink")
+
+
 def test_it_gives_up_cleanly_when_nothing_is_writable(tmp_path, monkeypatch):
     """No usable directory is not a crash here.
 
