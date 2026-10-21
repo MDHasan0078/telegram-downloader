@@ -727,8 +727,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-V", "--version", action="version", version=f"tg-dl {_app_version()}")
     sub = p.add_subparsers(dest="cmd", required=False)
 
-    g = sub.add_parser("gui", help="Launch the desktop GUI (Flet).")
-    g.add_argument("--port", type=int, default=0, help="Flet port (0=auto).")
+    g = sub.add_parser("gui", help="Launch the desktop GUI (GTK4).")
+    g.add_argument("--port", type=int, default=0,
+                   help="Serve the Flet GUI over HTTP on this port "
+                        "(0 = open the GTK window).")
+    g.add_argument("--flet", action="store_true",
+                   help="Use the Flet GUI instead of the GTK4 one.")
 
     d = sub.add_parser("download", help="Fetch titles, confirm, then download URL(s).")
     d.add_argument("urls", nargs="+", help="One or more t.me message URLs.")
@@ -759,9 +763,32 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if not args.cmd or args.cmd == "gui":
+        port = getattr(args, "port", 0) or 0
+        # A port means "serve the GUI over HTTP" -- the headless case, on a
+        # build machine or behind a tunnel. That is still Flet's job: the
+        # GTK app is a desktop app and has no server mode.
+        #
+        # With no port, the GTK4 GUI is the default. It is native, it needs
+        # nothing from the network, and it does not need the Flet desktop
+        # client -- which the .deb does not ship and which Flet would
+        # otherwise pip-install from PyPI at first launch, breaking the
+        # package's hermetic install.
+        if not port and not getattr(args, "flet", False):
+            try:
+                from .gtk import run_gtk
+                # The import of PyGObject happens inside run_gtk(), so the
+                # try has to cover the CALL, not just the import.
+                return int(run_gtk() or 0)
+            except (ImportError, ModuleNotFoundError) as exc:
+                print(f"The GTK4 GUI could not start: {exc}\n"
+                      "  It needs PyGObject and GTK4 from the distro:\n"
+                      "    sudo apt install python3-gi gir1.2-gtk-4.0\n"
+                      "  and the app's own dependencies:\n"
+                      "    pip install -e '.[gui]'\n"
+                      "Or use the Flet GUI:  tg-dl gui --flet", file=sys.stderr)
+                return 1
         try:
             from .gui import run_gui
-            port = getattr(args, "port", 0) or 0
             run_gui(port=port or None)
             return 0
         except (ImportError, ModuleNotFoundError):

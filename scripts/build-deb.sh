@@ -355,13 +355,21 @@ mkdir -p "$PKG/DEBIAN" "$PKG/opt/telegram-downloader" "$PKG/usr/bin" "$PKG/usr/s
 # vendored — every runtime wheel in wheels/ is py3-none-any now — so raising
 # the ceiling is a support claim that the closure walk above has to survive, not
 # a packaging detail. See requirements-runtime.lock.
+# The GUI is native GTK4, so the widgets come from the DISTRO: python3-gi
+# and gir1.2-gtk-4.0 are apt packages, not pip ones. adwaita-icon-theme is
+# the symbolic icon set the toolbar uses, and xdg-utils provides
+# xdg-open for the "open the download folder" button.
+#
+# These are hard dependencies rather than Recommends because the GUI is
+# the point of the package on a desktop, and because a half-installed
+# GUI is worse than one that refuses to start.
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: telegram-downloader
 Version: $VER
 Section: video
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.10), python3 (<< 3.15), python3-venv, python3-pip, ffmpeg, python3-gi, gir1.2-gtk-4.0
+Depends: python3 (>= 3.10), python3 (<< 3.15), python3-venv, python3-pip, ffmpeg, python3-gi, gir1.2-gtk-4.0, adwaita-icon-theme, xdg-utils
 Maintainer: tgdownloader <noreply@example.com>
 Description: Telegram media downloader (GUI + CLI)
  Persistent login, resumable downloads, queue, MP4 conversion.
@@ -492,7 +500,15 @@ else
   VENV="$USER_VENV"
 fi
 mkdir -p "$(dirname "$VENV")"
-[ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+# --system-site-packages: the GUI is native GTK4, and GTK4 and PyGObject
+# come from the DISTRO (python3-gi, gir1.2-gtk-4.0), not from pip. A venv
+# without the system site-packages cannot import `gi` at all, so the GUI
+# would not start on the very package that Depends on GTK.
+#
+# This does NOT weaken the hermetic install: the app's own dependencies
+# still come from the vendored wheels, hash-pinned, with --no-index and no
+# network. The distro packages are only visible, never fetched.
+[ -x "$VENV/bin/python" ] || python3 -m venv --system-site-packages "$VENV"
 
 # ---------------------------------------------------------------------------
 # HERMETIC INSTALL. Everything below is deliberately incapable of reaching the
