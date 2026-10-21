@@ -119,13 +119,27 @@ fun OngoingScreen(vm: TgViewModel) {
     }
 }
 
+/**
+ * The statuses that mean "this item is working right now".
+ *
+ * A set, not a parenthesised list: `x in ("a", "b")` is not Kotlin. The
+ * `in` operator wants a Collection on its right-hand side, and a
+ * parenthesised list of strings is just an expression, so the parser
+ * rejects it -- and the error it gives ("Expecting ')'") points at the
+ * wrong thing entirely.
+ */
+private val LIVE_STATUSES = setOf("downloading", "converting", "fetching")
+
+/** The statuses that mean "this item did not finish". */
+private val FAILED_STATUSES = setOf("error", "cancelled")
+
 /** Only the counters that are non-zero are shown: a zero is not a problem. */
 private fun summary(items: List<QueueItem>): String {
     if (items.isEmpty()) return "Nothing here yet."
-    val active = items.count { it.status in ("downloading", "converting", "fetching") }
+    val active = items.count { it.status in LIVE_STATUSES }
     val queued = items.count { it.status == "queued" }
     val done = items.count { it.status == "done" }
-    val failed = items.count { it.status in ("error", "cancelled") }
+    val failed = items.count { it.status in FAILED_STATUSES }
     val parts = listOf(
         active to "active",
         queued to "queued",
@@ -138,7 +152,7 @@ private fun summary(items: List<QueueItem>): String {
 @Composable
 private fun QueueRow(item: QueueItem, vm: TgViewModel) {
     val c = tgColors()
-    val live = item.status in ("downloading", "converting", "fetching")
+    val live = item.status in LIVE_STATUSES
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -202,7 +216,7 @@ private fun QueueRow(item: QueueItem, vm: TgViewModel) {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s1)) {
-                if (item.status in ("error", "cancelled")) {
+                if (item.status in FAILED_STATUSES) {
                     TgButton(
                         text = "Retry",
                         kind = TgButtonKind.Quiet,
