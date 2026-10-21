@@ -53,7 +53,14 @@ def test_every_xml_file_parses(path):
 
 
 def test_the_manifest_names_classes_that_exist():
-    """android:name=".Foo" is a class reference, and it must resolve."""
+    """android:name=".Foo" is a class reference, and it must resolve.
+
+    The class is searched for by DECLARATION, not by a file of the same
+    name: Kotlin allows several classes in one file, and TgApplication
+    lives in MainActivity.kt. A check that looked for TgApplication.kt
+    reported it missing, and the "fix" was a second, duplicate class --
+    which then failed the build with "Redeclaration".
+    """
     root = ET.parse(MANIFEST).getroot()
     names = set()
     for element in root.iter():
@@ -61,9 +68,17 @@ def test_the_manifest_names_classes_that_exist():
         if value and value.startswith("."):
             names.add(value[1:])
     assert names, "the manifest declares no classes"
-    for name in names:
-        assert (KOTLIN / f"{name}.kt").is_file(), (
-            f"the manifest names .{name} but there is no {name}.kt")
+
+    declared = set()
+    for path in KOTLIN.rglob("*.kt"):
+        declared.update(re.findall(
+            r"^\s*(?:private |internal |public |open )*"
+            r"(?:class|object|enum class|data class|sealed class)\s+"
+            r"([A-Za-z0-9_]+)", path.read_text(encoding="utf-8"), re.M))
+
+    for name in sorted(names):
+        assert name in declared, (
+            f"the manifest names .{name}, which no Kotlin file declares")
 
 
 def test_the_manifest_only_references_resources_that_exist():

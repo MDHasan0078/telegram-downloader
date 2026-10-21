@@ -72,7 +72,7 @@ fun TgTopBar(
 ) {
     val c = tgColors()
     val scroll = rememberScrollState()
-    val chipOffsets = remember { mutableStateMapOf<String, Int>() }
+    val chipOffsets = remember { mutableStateMapOf<String, Float>() }
     val chipWidths = remember { mutableStateMapOf<String, Int>() }
     var viewport by remember { mutableStateOf(0) }
 
@@ -118,7 +118,7 @@ fun TgTopBar(
 private fun Destination.chip(
     selected: Destination,
     onSelect: (Destination) -> Unit,
-    offsets: MutableMap<String, Int>,
+    offsets: MutableMap<String, Float>,
     widths: MutableMap<String, Int>,
 ) {
     val c = tgColors()

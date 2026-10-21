@@ -32,7 +32,7 @@ import com.tgdownloader.telegram_downloader.ui.Destination
 import com.tgdownloader.telegram_downloader.ui.OngoingScreen
 import com.tgdownloader.telegram_downloader.ui.SettingsScreen
 import com.tgdownloader.telegram_downloader.ui.TgBottomBar
-import com.tgdownloader.telegram_downloader.ui.TgTheme
+import com.tgdownloader.telegram_downloader.TgTheme
 import com.tgdownloader.telegram_downloader.ui.TgToast
 import com.tgdownloader.telegram_downloader.ui.TgTopBar
 import kotlinx.coroutines.delay

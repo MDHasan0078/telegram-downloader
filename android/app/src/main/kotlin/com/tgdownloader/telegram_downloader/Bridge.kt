@@ -167,7 +167,20 @@ object Bridge {
 
     private fun PyObject.asJsonArray(): JSONArray = JSONArray(asJson())
 
-    private fun <T> JSONObject.map(transform: (JSONObject) -> T): List<T> {
+    /**
+     * Map a JSON ARRAY of objects into Kotlin objects.
+     *
+     * The receiver is a JSONArray, not a JSONObject, and that is not
+     * cosmetic: JSONArray has getJSONObject(index) -- the int overload --
+     * and JSONObject does not. With a JSONObject receiver this did not
+     * compile ("actual type is 'Int', but 'String!' was expected"), and
+     * the two call sites that use it are reading arrays.
+     *
+     * The name is distinct from the stdlib's `map` on purpose: JSONArray is
+     * Iterable, so a member extension called `map` would quietly shadow the
+     * stdlib one.
+     */
+    private fun <T> JSONArray.mapObjects(transform: (JSONObject) -> T): List<T> {
         val out = ArrayList<T>()
         for (i in 0 until length()) {
             out.add(transform(getJSONObject(i)))
@@ -217,7 +230,7 @@ object Bridge {
     // -- the queue ---------------------------------------------------------
 
     suspend fun queueItems(): List<QueueItem> = io {
-        call("get_queue_items").asJsonArray().map { o ->
+        call("get_queue_items").asJsonArray().mapObjects { o ->
             QueueItem(
                 id = o.optString("id"),
                 url = o.optString("url"),
@@ -336,7 +349,7 @@ object Bridge {
     // -- the rest ---------------------------------------------------------
 
     suspend fun dependencies(): List<DependencyRow> = io {
-        call("get_dependencies").asJsonArray().map { o ->
+        call("get_dependencies").asJsonArray().mapObjects { o ->
             DependencyRow(
                 name = o.optString("name"),
                 ok = o.optBoolean("ok"),
