@@ -74,6 +74,13 @@ def texts_in(xml: str) -> set[str]:
     return {t for t in re.findall(r'text="([^"]*)"', xml) if t.strip()}
 
 
+def _shows(xml: str, needles) -> bool:
+    """Does the tree show any of these strings?"""
+    shown = texts_in(xml)
+    return any(needle.lower() in text.lower()
+               for needle in needles for text in shown)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="dist", help="where to write the captures")
@@ -89,16 +96,33 @@ def main(argv=None) -> int:
             print(f"::error::could not read the accessibility tree for {label}")
             return 1
 
-        if key != "add":
-            # Tap the destination by its own label.
-            spot = node_bounds(tree, label)
-            if spot is None:
-                print(f"::error::no node labelled {label!r} to tap")
-                failures.append(f"{label}: no tab to tap")
-                continue
+        # Tap the destination by its own label. EVERY screen, including
+        # the first: the app does not open on "Add" -- it opens where the
+        # user left off, and with no credentials that is Account auth.
+        # Assuming the first screen is the one the app opened on is how
+        # you end up asserting that Account auth shows a link field.
+        spot = node_bounds(tree, label)
+        if spot is None:
+            print(f"::error::no node labelled {label!r} to tap")
+            failures.append(f"{label}: no tab to tap")
+            continue
+
+        # Tap until the screen actually changes. The first tap after the
+        # app comes up is sometimes swallowed -- the window is still
+        # animating in, and the tap lands on a surface that is not there
+        # yet -- and a test that silently screenshots the PREVIOUS screen
+        # is worse than no test, because it looks like it passed.
+        for attempt in range(4):
             adb("shell", "input", "tap", str(spot[0]), str(spot[1]))
-            time.sleep(2.0)
+            time.sleep(1.5)
             tree = dump_tree()
+            if _shows(tree, expected):
+                break
+        else:
+            print(f"::error::tapping {label!r} did not change the screen")
+            print(f"  what it shows: {sorted(texts_in(tree))[:20]}")
+            failures.append(f"{label}: the tap did not change the screen")
+            continue
 
         (out / f"screen-{key}.xml").write_text(tree, encoding="utf-8")
         shot = out / f"screen-{key}.png"
