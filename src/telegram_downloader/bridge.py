@@ -851,6 +851,104 @@ def check_for_update() -> dict:
     return _require_engine().run(_do(), timeout=120)
 
 
+# ---------------------------------------------------------------------------
+# The update download
+# ---------------------------------------------------------------------------
+#
+# The download runs in the BACKGROUND and the UI polls the state, because
+# a 25 MB package takes long enough that a UI which waited for it would
+# look frozen -- which is the exact bug the user reported about the
+# updater: pressing the button and seeing nothing happen.
+#
+# The state is a plain dict, written by the download thread and read by
+# the poller. It is the same shape as the queue's progress: the worker
+# never touches a control.
+_UPDATE_DOWNLOAD = {
+    "status": "idle",     # idle | downloading | done | error
+    "progress": 0.0,      # 0..1
+    "done": 0,            # bytes so far
+    "total": 0,           # bytes expected; 0 when the server did not say
+    "detail": "",         # the human line under the bar
+    "error": "",
+    "path": "",           # where the verified package ended up
+    "version": "",
+    "name": "",
+}
+
+
+def start_update_download() -> dict:
+    """Start downloading this platform's package for the newest release.
+
+    Returns as soon as the download is under way; the progress is polled
+    with get_update_download_state(). A second call while one is in
+    flight is refused rather than starting a second download.
+    """
+    from . import updates as updates_mod
+
+    async def _do() -> dict:
+        engine = _require_engine()
+        if _UPDATE_DOWNLOAD["status"] == "downloading":
+            return {"ok": True, "already": True,
+                    "version": _UPDATE_DOWNLOAD["version"]}
+        info = await asyncio.to_thread(updates_mod.check_for_update)
+        if info is None:
+            return {"ok": False, "error": "Could not reach the update server."}
+        # platform.system() reports "Linux" on Android, so the OS is
+        # passed explicitly. Without this the app would look for the
+        # desktop .deb and find no Android package at all.
+        asset = info.asset_for_platform("android")
+        if asset is None:
+            return {"ok": False,
+                    "error": "This release has no Android package."}
+        _UPDATE_DOWNLOAD.update(
+            status="downloading", progress=0.0, done=0, total=0, detail="",
+            error="", path="", version=info.latest_version, name=asset.name)
+        engine.submit(_download_update(info, asset))
+        return {"ok": True, "version": info.latest_version, "name": asset.name}
+
+    return _require_engine().run(_do(), timeout=120)
+
+
+async def _download_update(info, asset) -> None:
+    """The download itself, on the engine's loop. Never raises.
+
+    The package lands in the app's OWN storage rather than the user's
+    download folder: it is not something the user asked to keep, and the
+    app has to be able to hand it to the system package installer, which
+    can only read paths the app shares with it.
+    """
+    from . import updates as updates_mod
+    from .telegram_utils import format_bytes
+
+    def _on_progress(done: int, total) -> None:
+        _UPDATE_DOWNLOAD["done"] = int(done or 0)
+        if total:
+            _UPDATE_DOWNLOAD["total"] = int(total)
+            _UPDATE_DOWNLOAD["progress"] = min(1.0, done / total)
+            _UPDATE_DOWNLOAD["detail"] = (f"{format_bytes(done)} of "
+                                          f"{format_bytes(total)}")
+        else:
+            _UPDATE_DOWNLOAD["detail"] = f"{format_bytes(done)} downloaded"
+
+    try:
+        dest_dir = os.path.join(_files_dir, "updates")
+        os.makedirs(dest_dir, mode=0o700, exist_ok=True)
+        dest = await asyncio.to_thread(
+            updates_mod.download_asset, asset, dest_dir,
+            info.latest_version,
+            os.environ.get("GITHUB_TOKEN") or None,
+            progress=_on_progress)
+    except Exception as exc:          # noqa: BLE001 - shown to the user
+        _UPDATE_DOWNLOAD.update(status="error", error=_sanitize(str(exc)))
+        return
+    _UPDATE_DOWNLOAD.update(status="done", progress=1.0, path=str(dest))
+
+
+def get_update_download_state() -> dict:
+    """The state of the update download, for the UI to poll."""
+    return dict(_UPDATE_DOWNLOAD)
+
+
 def verify_credentials() -> dict:
     """Check the stored credentials against Telegram."""
     from .config import load_settings

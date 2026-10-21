@@ -6,6 +6,14 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!--
+      Installing an update: the app downloads the release package and hands
+      it to the system installer. Android 8 and later require this
+      permission for that, and the user grants it per app. The app sends
+      them to that setting rather than pretending the install will work.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
       No storage permission is requested, and none is needed.
 
       The download folder is the app's OWN directory on the shared external
@@ -41,5 +49,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          The downloaded update package lives in the app's own storage, and
+          the system package installer cannot read that. A FileProvider
+          shares exactly one directory with it, through a one-shot read
+          grant, and nothing else in the app is exposed.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

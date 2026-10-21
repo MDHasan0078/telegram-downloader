@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The one directory the system package installer is allowed to read.
+
+  The update package is downloaded into the app's own storage
+  (`<files>/updates/`), because it is not something the user asked to
+  keep in their Downloads folder, and because the app has to be able to
+  hand it to the installer afterwards. Everything else the app stores,
+  the config directory, the Telegram session, the cached Python, is NOT
+  listed here, and so cannot be shared with any other app.
+-->
+<paths>
+    <files-path name="updates" path="updates/" />
+</paths>

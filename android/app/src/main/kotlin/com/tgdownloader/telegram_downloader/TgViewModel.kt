@@ -72,6 +72,14 @@ class TgViewModel(app: Application) : AndroidViewModel(app) {
     var updateBusy by mutableStateOf(false)
         private set
 
+    /** What the last update check found. */
+    var updateResult by mutableStateOf(UpdateResult())
+        private set
+
+    /** The progress of the update download, while one is running. */
+    var updateDownload by mutableStateOf(UpdateDownloadState())
+        private set
+
     private var parseJob: Job? = null
     private var noticeId = 0L
 
@@ -210,6 +218,11 @@ class TgViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The folder the user picked cannot be used. */
     fun reportFolderError(message: String) {
+        say(message, isError = true)
+    }
+
+    /** The update could not be installed, and the user has to be told why. */
+    fun reportUpdateError(message: String) {
         say(message, isError = true)
     }
 
@@ -443,6 +456,7 @@ class TgViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = Bridge.checkForUpdate()
+                updateResult = result
                 if (!result.ok) {
                     say(result.error.ifEmpty { "Could not reach the update server." }, isError = true)
                 } else if (!result.newer) {
@@ -454,6 +468,48 @@ class TgViewModel(app: Application) : AndroidViewModel(app) {
                 say(e.message ?: "Update check failed.", isError = true)
             } finally {
                 updateBusy = false
+            }
+        }
+    }
+
+    /**
+     * Download the update package, with a bar that moves.
+     *
+     * The download itself is in the engine's background: this polls it
+     * and paints the state it finds. Nothing here blocks the UI thread,
+     * and the bar is driven by the polled state, so a 25 MB package
+     * takes as long as it takes and the screen stays alive.
+     *
+     * The total size is not known until the server sends it, so the bar
+     * starts indeterminate and becomes a real percentage once the
+     * content length arrives.
+     */
+    fun startUpdateDownload() {
+        if (!guard()) return
+        if (updateDownload.downloading) return
+        viewModelScope.launch {
+            try {
+                val started = Bridge.startUpdateDownload()
+                if (!started.ok) {
+                    say(started.error.ifEmpty { "Could not start the download." }, isError = true)
+                    return@launch
+                }
+                while (true) {
+                    val state = runCatching { Bridge.updateDownloadState() }.getOrNull()
+                        ?: break
+                    updateDownload = state
+                    if (!state.downloading) break
+                    delay(250)
+                }
+                val state = updateDownload
+                when {
+                    state.doneOk ->
+                        say("Update ${state.version} downloaded. Install it to finish.")
+                    state.failed ->
+                        say(state.error.ifEmpty { "The download failed." }, isError = true)
+                }
+            } catch (e: Exception) {
+                say(e.message ?: "The download failed.", isError = true)
             }
         }
     }

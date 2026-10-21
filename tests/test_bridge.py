@@ -79,6 +79,69 @@ out["login_password_empty"] = bridge.login_password("")
 out["deps"] = bridge.get_dependencies()
 out["caps"] = bridge.get_capabilities()
 
+# --- the update download ----------------------------------------------------
+# The network is stubbed out: this is about the bridge's own contract --
+# which asset it picks, where the file lands, and what the state says
+# while it is running -- not about GitHub.
+from telegram_downloader import updates as _updates
+
+class _Asset:
+    def __init__(self, name):
+        self.name = name
+        self.url = "https://example.invalid/releases/" + name
+
+class _Info:
+    latest_version = "9.9.9"
+    release_url = "https://example.invalid/releases"
+    assets = [
+        _Asset("telegram-downloader_9.9.9.apk"),
+        _Asset("telegram-downloader_9.9.9_amd64.deb"),
+        _Asset("telegram-downloader_9.9.9.dmg"),
+    ]
+    def is_newer_than(self, current):
+        return True
+    def asset_for_platform(self, operating_system=None):
+        wanted = {
+            "android": "telegram-downloader_9.9.9.apk",
+            "linux": "telegram-downloader_9.9.9_amd64.deb",
+        }.get(operating_system)
+        for asset in self.assets:
+            if asset.name == wanted:
+                return asset
+        return None
+
+_updates.check_for_update = lambda *a, **k: _Info()
+
+_seen = {}
+
+def _fake_download(asset, dest_dir, *args, **kwargs):
+    _seen["asset"] = asset.name
+    _seen["dest_dir"] = str(dest_dir)
+    _seen["tag_version"] = args[0] if args else kwargs.get("tag_version")
+    progress = kwargs.get("progress")
+    if progress is not None:
+        progress(512, 1024)
+        progress(1024, 1024)
+    return os.path.join(str(dest_dir), asset.name)
+
+_updates.download_asset = _fake_download
+
+out["update_state_before"] = bridge.get_update_download_state()
+out["update_start"] = bridge.start_update_download()
+
+# The download runs in the background: the bridge returns as soon as it
+# is under way, and the UI polls the state. Wait for it to finish.
+import time
+_state = bridge.get_update_download_state()
+_deadline = time.time() + 30
+while time.time() < _deadline:
+    _state = bridge.get_update_download_state()
+    if _state["status"] in ("done", "error"):
+        break
+    time.sleep(0.05)
+out["update_state_after"] = _state
+out["update_seen"] = _seen
+
 print(json.dumps(out))
 '''
 
@@ -185,3 +248,70 @@ def test_dependencies_say_the_truth_about_ffmpeg(tmp_path):
     caps = data["caps"]
     assert caps["platform"] == "android"
     assert caps["modes"] == (["1", "2", "3"] if caps["ffmpeg"] else ["1"])
+
+
+def test_the_update_download_picks_the_android_package(tmp_path):
+    """On Android the app must fetch the .apk, not the desktop .deb.
+
+    platform.system() reports "Linux" on Android, so the asset has to be
+    resolved with the platform stated. Without that the app would look
+    for the .deb, not find one, and the updater would say "no installer
+    for this platform" on the one platform that CAN install one.
+    """
+    data = _run(tmp_path)
+    assert data["update_start"]["ok"] is True
+    assert data["update_seen"]["asset"] == "telegram-downloader_9.9.9.apk"
+    # The release version travels with it: the download is verified
+    # against the signed manifest of that exact release.
+    assert data["update_seen"]["tag_version"] == "9.9.9"
+
+
+def test_the_update_download_lands_in_the_apps_own_storage(tmp_path):
+    """The package goes to the app's own directory, not the download folder.
+
+    Two reasons, both load-bearing: the app has to be able to hand the
+    file to the system installer afterwards, and a 25 MB package the
+    user never asked for does not belong in their Downloads folder.
+    """
+    data = _run(tmp_path)
+    dest = data["update_seen"]["dest_dir"]
+    assert dest.startswith(str(tmp_path / "home"))
+    assert dest.endswith(os.path.join("home", "updates"))
+
+
+def test_the_update_download_reports_progress_and_completes(tmp_path):
+    """The state the UI polls has to say what is happening.
+
+    This is the whole bug: the updater looked like it had done nothing,
+    because nothing said that a download was under way.
+    """
+    data = _run(tmp_path)
+    before = data["update_state_before"]
+    assert before["status"] == "idle"
+    assert before["progress"] == 0.0
+
+    after = data["update_state_after"]
+    assert after["status"] == "done", after
+    assert after["progress"] == 1.0
+    assert after["error"] == ""
+    # The bytes, and the human line under the bar.
+    assert after["done"] == 1024
+    assert after["total"] == 1024
+    assert after["detail"]
+    # And where the verified package ended up.
+    assert after["path"].endswith("telegram-downloader_9.9.9.apk")
+    assert after["version"] == "9.9.9"
+    assert after["name"] == "telegram-downloader_9.9.9.apk"
+
+
+def test_the_update_state_has_every_field_the_kotlin_reads(tmp_path):
+    """The Kotlin reads these keys by name, through a JSON object.
+
+    A missing key is not a compile error on either side -- it is a
+    blank line on the screen -- so the shape is checked here.
+    """
+    data = _run(tmp_path)
+    for key in ("status", "progress", "done", "total", "detail",
+                "error", "path", "version", "name"):
+        assert key in data["update_state_after"], (
+            f"the update state has no {key!r}, and the Kotlin reads it")

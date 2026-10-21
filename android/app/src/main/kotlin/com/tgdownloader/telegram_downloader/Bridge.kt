@@ -88,6 +88,30 @@ data class UpdateResult(
 )
 
 /**
+ * The state of the update download, as the Python side sees it.
+ *
+ * `status` is "idle" | "downloading" | "done" | "error"; `progress` is
+ * 0..1 and is 0 while the total size is still unknown, which is when
+ * the bar has to be indeterminate rather than pinned at zero.
+ */
+data class UpdateDownloadState(
+    val status: String = "idle",
+    val progress: Float = 0f,
+    val done: Long = 0L,
+    val total: Long = 0L,
+    val detail: String = "",
+    val error: String = "",
+    val path: String = "",
+    val version: String = "",
+    val name: String = "",
+) {
+    val downloading: Boolean get() = status == "downloading"
+    val doneOk: Boolean get() = status == "done"
+    val failed: Boolean get() = status == "error"
+    val known: Boolean get() = total > 0L
+}
+
+/**
  * Kotlin -> Python, over Chaquopy.
  *
  * There is no socket and no HTTP: the Python engine runs IN-PROCESS with
@@ -370,6 +394,38 @@ object Bridge {
                 current = o.optString("current"),
                 newer = o.optBoolean("newer"),
                 error = o.optString("error"),
+            )
+        }
+    }
+
+    /**
+     * Start downloading the update package. Returns as soon as it is
+     * under way -- the download itself is in the background, and its
+     * progress is polled with updateDownloadState().
+     */
+    suspend fun startUpdateDownload(): UpdateResult = io {
+        call("start_update_download").asJsonObject().let { o ->
+            UpdateResult(
+                ok = o.optBoolean("ok"),
+                version = o.optString("version"),
+                error = o.optString("error"),
+            )
+        }
+    }
+
+    /** The state of the update download. */
+    suspend fun updateDownloadState(): UpdateDownloadState = io {
+        call("get_update_download_state").asJsonObject().let { o ->
+            UpdateDownloadState(
+                status = o.optString("status", "idle"),
+                progress = o.optDouble("progress", 0.0).toFloat(),
+                done = o.optLong("done", 0L),
+                total = o.optLong("total", 0L),
+                detail = o.optString("detail"),
+                error = o.optString("error"),
+                path = o.optString("path"),
+                version = o.optString("version"),
+                name = o.optString("name"),
             )
         }
     }

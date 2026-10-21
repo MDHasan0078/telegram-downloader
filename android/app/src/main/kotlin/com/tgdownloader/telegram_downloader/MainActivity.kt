@@ -1,10 +1,12 @@
 package com.tgdownloader.telegram_downloader
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chaquo.python.android.PyApplication
 import com.tgdownloader.telegram_downloader.ui.AddScreen
@@ -141,7 +144,12 @@ fun TgApp() {
                         )
                         Destination.Ongoing -> OngoingScreen(vm)
                         Destination.Auth -> AuthScreen(vm)
-                        Destination.Settings -> SettingsScreen(vm)
+                        Destination.Settings -> SettingsScreen(
+                            vm = vm,
+                            onInstallUpdate = {
+                                installUpdate(context, vm.updateDownload.path, vm)
+                            },
+                        )
                     }
                 }
                 TgBottomBar(
@@ -271,4 +279,53 @@ private fun canWrite(path: String): Boolean = try {
     true
 } catch (e: Exception) {
     false
+}
+
+/**
+ * Hand the downloaded update package to the system installer.
+ *
+ * The package is in the app's own storage, which the installer cannot
+ * read, so it is shared through the FileProvider: the installer gets a
+ * content:// URI with a one-shot read grant and nothing else in the app
+ * is exposed.
+ *
+ * Android 8 and later need the app to be allowed to install packages
+ * before the installer opens. That is a per-app setting, so the app
+ * sends the user to it and says what to do next, rather than firing an
+ * intent that fails.
+ */
+private fun installUpdate(context: Context, path: String, vm: TgViewModel) {
+    val file = File(path)
+    if (path.isEmpty() || !file.exists()) {
+        vm.reportUpdateError("The downloaded package is not there any more.")
+        return
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !context.packageManager.canRequestPackageInstalls()
+    ) {
+        runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+            )
+        }
+        vm.reportUpdateError(
+            "Allow Telegram Downloader to install updates, then tap Install again."
+        )
+        return
+    }
+    runCatching {
+        val uri = FileProvider.getUriForFile(
+            context, "${context.packageName}.files", file
+        )
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        )
+    }.onFailure {
+        vm.reportUpdateError(it.message ?: "Could not start the installer.")
+    }
 }

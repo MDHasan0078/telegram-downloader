@@ -31,7 +31,7 @@ import com.tgdownloader.telegram_downloader.tgColors
  * one place to change one value.
  */
 @Composable
-fun SettingsScreen(vm: TgViewModel) {
+fun SettingsScreen(vm: TgViewModel, onInstallUpdate: () -> Unit = {}) {
     val c = tgColors()
     var showReset by remember { mutableStateOf(false) }
     var phrase by remember { mutableStateOf("") }
@@ -77,6 +77,7 @@ fun SettingsScreen(vm: TgViewModel) {
             onClick = vm::checkForUpdate,
             busy = vm.updateBusy,
         )
+        UpdateSection(vm, onInstallUpdate)
 
         // -- Danger zone
         TgSectionLabel("Danger zone")
@@ -139,6 +140,63 @@ fun SettingsScreen(vm: TgViewModel) {
                     },
                 )
             },
+        )
+    }
+}
+
+/**
+ * The update, once a check has found one.
+ *
+ * The bar is the point of this. The download runs in the engine's
+ * background, and this is the only thing that says it is happening: a
+ * button that goes quiet for half a minute reads as a broken app, and
+ * that is exactly what the updater used to look like.
+ *
+ * The bar is indeterminate until the server says how big the package is,
+ * because a bar pinned at zero for the first second reads as "stuck"
+ * rather than "starting".
+ */
+@Composable
+private fun UpdateSection(vm: TgViewModel, onInstallUpdate: () -> Unit) {
+    val c = tgColors()
+    val result = vm.updateResult
+    if (!result.ok || !result.newer) return
+
+    TgNotice(
+        text = "Telegram Downloader ${result.version} is available.",
+        kind = TgNoticeKind.Info,
+    )
+    val download = vm.updateDownload
+    when {
+        download.downloading -> {
+            TgProgressBar(
+                value = if (download.known) download.progress else null,
+            )
+            Text(
+                text = download.detail.ifEmpty { "Downloading the update…" },
+                color = c.muted,
+                fontSize = Type.meta,
+            )
+        }
+        download.doneOk -> {
+            TgButton(
+                text = "Install update",
+                kind = TgButtonKind.Primary,
+                onClick = onInstallUpdate,
+            )
+        }
+        else -> {
+            TgButton(
+                text = "Download update",
+                kind = TgButtonKind.Primary,
+                onClick = vm::startUpdateDownload,
+            )
+        }
+    }
+    if (download.failed) {
+        TgNotice(
+            text = download.error.ifEmpty { "The download failed." },
+            kind = TgNoticeKind.Error,
         )
     }
 }
