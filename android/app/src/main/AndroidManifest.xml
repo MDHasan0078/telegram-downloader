@@ -32,7 +32,7 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenSizeSmallest|keyboardHidden|uiMode|density|fontScale"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
             android:exported="true"
             android:label="@string/app_name"
             android:windowSoftInputMode="adjustResize">

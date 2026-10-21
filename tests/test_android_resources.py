@@ -89,3 +89,34 @@ def test_the_manifest_only_references_resources_that_exist():
         assert name in defined.get(kind, set()), (
             f"the manifest references @{kind}/{name}, which res/ does not "
             f"define")
+
+
+# The flags android:configChanges accepts. Taken from AAPT's own list, which
+# it prints in the error when a flag is not one of these -- and when one is
+# not, AAPT reports the WHOLE list as incompatible, so the message names
+# the symptom rather than the typo.
+CONFIG_CHANGES_FLAGS = {
+    "assetsPaths", "colorMode", "density", "fontScale",
+    "fontWeightAdjustment", "grammaticalGender", "keyboard", "keyboardHidden",
+    "layoutDirection", "locale", "mcc", "mnc", "navigation", "orientation",
+    "resourcesUnused", "screenLayout", "screenSize", "smallestScreenSize",
+    "touchscreen", "uiMode",
+}
+
+
+def test_every_config_changes_flag_is_real():
+    """`screenSizeSmallest` is not a flag. `smallestScreenSize` is.
+
+    AAPT's error for it is unhelpful: it lists every flag it knows and
+    says the whole set is "incompatible with attribute configChanges",
+    which reads as if the whole list were wrong.
+    """
+    root = ET.parse(MANIFEST).getroot()
+    for element in root.iter():
+        value = element.get(f"{ANDROID_NS}configChanges")
+        if not value:
+            continue
+        for flag in value.split("|"):
+            assert flag in CONFIG_CHANGES_FLAGS, (
+                f"android:configChanges names {flag!r}, which is not a flag. "
+                f"The real one is 'smallestScreenSize'.")
