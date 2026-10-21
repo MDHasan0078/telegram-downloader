@@ -1513,13 +1513,20 @@ def run_gui(port=None, view=None):
                 except Exception:
                     pass
                 return
-            snack(page, f"Downloading {asset.name}...")
             try:
                 token = os.environ.get("GITHUB_TOKEN") or ""
-                dest = await asyncio.to_thread(
-                    updates.download_asset, asset,
-                    ensure_download_dir(load_settings()), info.latest_version,
-                    token or None)
+
+                async def _download(progress_cb):
+                    # On a worker thread: the download is blocking, and the
+                    # bar is painted by the poller on this event loop, so
+                    # the two must not share a thread.
+                    return await asyncio.to_thread(
+                        updates.download_asset, asset,
+                        ensure_download_dir(load_settings()),
+                        info.latest_version, token or None,
+                        progress=progress_cb)
+
+                dest = await download_progress_dialog(page, asset, _download)
             except Exception as exc:
                 snack(page, f"Download failed: {exc}", error=True)
                 return
@@ -2065,6 +2072,57 @@ def run_gui(port=None, view=None):
         )
         _show_dlg(page, dlg)
         return bool(await fut)
+
+    async def download_progress_dialog(page, asset, download):
+        """Show the download with a live progress bar, and return the path.
+
+        The download runs on a worker thread, so the bar is painted by a
+        poller on the event loop reading a plain dict the thread writes to.
+        The worker never touches a control.
+
+        `download` is a callable that takes a progress callback and returns
+        the downloaded path.
+        """
+        state = {"done": 0, "total": None, "failed": None}
+        bar = ui.progress(None, expand=True)          # indeterminate
+        detail = ui.text("Starting…", role=ui.ROLE_META)
+
+        def _on_progress(done: int, total):
+            state["done"] = done
+            state["total"] = total
+
+        async def _poll():
+            while True:
+                done, total = state["done"], state["total"]
+                if total:
+                    bar.value = min(1.0, done / total)
+                    detail.value = (f"{format_bytes(done)} of "
+                                    f"{format_bytes(total)}")
+                else:
+                    bar.value = None
+                    detail.value = f"{format_bytes(done)} downloaded"
+                try:
+                    bar.update()
+                    detail.update()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.25)
+
+        dlg = ft.AlertDialog(
+            title=ui.text("Downloading the update", role=ui.ROLE_TITLE),
+            icon=ft.Icon(ft.Icons.DOWNLOAD),
+            content=ui.stack([bar, detail], spacing=ui.S2),
+        )
+        _show_dlg(page, dlg)
+        poller = asyncio.create_task(_poll())
+        try:
+            return await download(_on_progress)
+        finally:
+            poller.cancel()
+            try:
+                _hide_dlg(page, dlg)
+            except Exception:
+                pass
 
     async def update_dialog(page, info) -> str:
         """Update-available dialog. Returns 'later' | 'page' | 'download'."""

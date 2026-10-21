@@ -730,7 +730,8 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
                    tag_version=_UNSET,
                    token: str | None = None,
                    allow_unsigned: bool = False,
-                   timeout: int = 30) -> object:
+                   timeout: int = 30,
+                   progress=None) -> object:
     """Download an installer asset into *dest_dir*. Returns the final path.
 
     Integrity (both steps mandatory, both before a single payload byte is
@@ -873,6 +874,14 @@ def download_asset(asset: UpdateAsset, dest_dir, *legacy_args,
                     if _time.monotonic() > deadline:
                         raise ValueError("Asset download exceeded the time budget; aborted.")
                     fh.write(chunk)
+                    if progress is not None:
+                        # The callback runs on the download thread, so it
+                        # must not touch the UI; the caller marshals it.
+                        # A failing callback must not fail the download.
+                        try:
+                            progress(total, declared_size)
+                        except Exception:
+                            pass
         try:
             if tmp.is_symlink():
                 raise ValueError("Refusing to publish through symlink tmp file.")
