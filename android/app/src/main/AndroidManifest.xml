@@ -12,7 +12,7 @@
       volume (`getExternalFilesDir(DIRECTORY_DOWNLOADS)`), which the app may
       read and write on every Android version without a runtime permission.
       The .txt batch file is read through the system file picker, which
-      grants access to the one file the user picked -- no permission, no
+      grants access to the one file the user picked: no permission, no
       broad filesystem access.
 
       That is the honest answer to "scoped storage": the engine writes
