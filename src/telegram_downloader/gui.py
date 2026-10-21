@@ -138,6 +138,22 @@ def _page_service(page, cls):
     return svc
 
 
+def _desktop_client() -> bool:
+    """Is the Flet desktop client importable?
+
+    The desktop GUI is rendered by a separate `flet-desktop` package that
+    carries the Flutter client binary. It is NOT a dependency of `flet`
+    itself -- only of its `desktop` extra -- so an install that was made
+    from the `gui` extra has no client, and flet will reach for PyPI to
+    get one. This checks without triggering that.
+    """
+    try:
+        import importlib.util
+        return importlib.util.find_spec("flet_desktop") is not None
+    except Exception:
+        return False
+
+
 def app_logo_src() -> str | None:
     """The packaged app logo as a data URI, or None if unavailable.
 
@@ -2503,9 +2519,43 @@ def run_gui(port=None, view=None):
     # `view` exists so the GUI can be served over HTTP on a headless machine
     # (Codespaces, CI, a container): without it flet opens a desktop window and
     # dies when there is no display. Left None, behaviour is unchanged.
+    #
+    # upload_dir is what makes the FILE PICKER work in the web build.
+    # The desktop and Android clients hand back a real path on the machine
+    # that picked the file, so they never need it. The web client has no
+    # filesystem, so it uploads the picked file to the server and fills in
+    # the path from the response -- and with no upload storage configured
+    # that upload goes nowhere. The picker then returns a FilePickerFile
+    # whose `path` is None, which the caller has to treat as a failure.
+    # See flet's own note: "To enable built-in upload storage, provide the
+    # upload_dir argument to ft.run()".
+    try:
+        import tempfile
+        _upload_dir = tempfile.mkdtemp(prefix="tgdl-uploads-")
+    except Exception:
+        _upload_dir = None
+
     if view is not None:
-        ft.app(target=_main, port=port, view=view)
+        ft.app(target=_main, port=port, view=view, upload_dir=_upload_dir)
     elif port:
-        ft.app(target=_main, port=port)
+        ft.app(target=_main, port=port, upload_dir=_upload_dir)
     else:
-        ft.app(target=_main)
+        # A desktop app needs the flet-desktop client. When it is missing,
+        # flet PIP-INSTALLS IT FROM PyPI on the spot -- which breaks the
+        # .deb's whole hermetic install (--no-index, --require-hashes, "no
+        # PyPI, ever") and, with the current flet-web, crashes anyway with
+        # "FastAPI.__init__() got an unexpected keyword argument
+        # 'openapi_prefix'".
+        #
+        # The embedded runtimes (Android sets FLET_PLATFORM=android) use
+        # their own transport and never want the desktop client, so the
+        # check is skipped for them.
+        if not os.environ.get("FLET_PLATFORM") and not _desktop_client():
+            sys.stderr.write(
+                "tg-dl: the desktop GUI needs the Flet desktop client, "
+                "which is not installed.\n"
+                "  It is NOT downloaded automatically: that would break "
+                "the hermetic install this package is built for.\n"
+                "  Install it with:  pip install 'flet[desktop]==0.86.5'\n")
+            raise SystemExit(2)
+        ft.app(target=_main, upload_dir=_upload_dir)

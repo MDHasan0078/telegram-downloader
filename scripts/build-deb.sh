@@ -361,7 +361,7 @@ Version: $VER
 Section: video
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.10), python3 (<< 3.15), python3-venv, python3-pip, ffmpeg
+Depends: python3 (>= 3.10), python3 (<< 3.15), python3-venv, python3-pip, ffmpeg, python3-gi, gir1.2-gtk-4.0
 Maintainer: tgdownloader <noreply@example.com>
 Description: Telegram media downloader (GUI + CLI)
  Persistent login, resumable downloads, queue, MP4 conversion.

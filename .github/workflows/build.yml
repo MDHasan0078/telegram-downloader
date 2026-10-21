@@ -174,8 +174,11 @@ jobs:
       # Checksums are generated in the `release` job, not here: this job both
       # produces the artifact and signs the statement about it, which binds the
       # checksum to nothing.
+      #
+      # Uploaded on branch pushes too, not only on tags: the deb-environment
+      # job downloads this artifact to test the INSTALLED package, and a
+      # branch push is exactly when that is worth running.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: deb
           path: |
@@ -251,12 +254,129 @@ jobs:
             --out "${APK[0]}" "${APK[0]}.aligned"
           rm -f "${APK[0]}.aligned" "$RUNNER_TEMP/upload.jks"
           "$BT/apksigner" verify --verbose --print-certs "${APK[0]}"
+      # Uploaded on branch pushes too, for the same reason as the .deb: the
+      # apk-emulator job installs this artifact on a real Android runtime.
+      # Signing is still tag-only, so a branch build is an unsigned .apk.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: apk
           path: |
             dist/apk/*.apk
+
+  # ------------------------------------------------------------ deb-environment
+  # The .deb in ITS OWN environment.
+  #
+  # The suite tests the repository; this job tests the ARTIFACT, installed the
+  # way a user installs it. That difference is not academic: the .deb is built
+  # to be hermetic (--no-index, --require-hashes, "no PyPI, ever") and the GUI
+  # was silently breaking that rule -- flet reaches for PyPI at first launch
+  # when the desktop client is missing, pulling flet-web + fastapi + starlette
+  # + uvicorn UNPINNED, and then crashing on
+  # "FastAPI.__init__() got an unexpected keyword argument 'openapi_prefix'".
+  # 164 green tests and a green .deb build never saw it, because nothing ever
+  # ran the installed artifact.
+  deb-environment:
+    needs: [deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the .deb
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: deb
+          path: dist
+      - name: Install the distro GTK the package now depends on
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-gi gir1.2-gtk-4.0 xvfb
+      - name: Install the artifact and run it offline
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/deb-env"
+          rm -rf "$WORK"; mkdir -p "$WORK"
+          dpkg-deb -x dist/*.deb "$WORK/root"
+          APP="$WORK/root/opt/telegram-downloader"
+          sed "s#^APP=/opt/telegram-downloader#APP=$APP#" \
+            "$APP/run.sh" > "$WORK/run.sh"
+          chmod +x "$WORK/run.sh"
+          # No network at all, so anything that reaches for PyPI fails loudly
+          # instead of quietly downloading 26 MB.
+          if unshare -rn true 2>/dev/null; then
+            ISOLATE=(unshare -rn)
+          else
+            export http_proxy=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 all_proxy=http://127.0.0.1:1
+            ISOLATE=()
+          fi
+          echo "--- the CLI, offline ---"
+          "${ISOLATE[@]}" env HOME="$WORK/home" \
+            XDG_DATA_HOME="$WORK/home/.local/share" "$WORK/run.sh" --version
+          echo "--- the GUI, offline ---"
+          set +e
+          "${ISOLATE[@]}" env HOME="$WORK/home" \
+            XDG_DATA_HOME="$WORK/home/.local/share" \
+            PATH="/usr/bin:/bin" timeout 90 "$WORK/run.sh" gui \
+            > "$WORK/gui.log" 2>&1
+          GUI_RC=$?
+          set -e
+          cat "$WORK/gui.log"
+          # The GUI must NOT have tried to install anything, and it must not
+          # have crashed. It may legitimately exit non-zero (no display on a
+          # headless runner) -- what it must not do is reach the network or
+          # die with a traceback.
+          if grep -qiE "pip install|Could not reach the index|openapi_prefix" \
+               "$WORK/gui.log"; then
+            echo "::error::the installed GUI tried to fetch a client from PyPI"
+            exit 1
+          fi
+          if grep -qE "Traceback \(most recent call last\)" "$WORK/gui.log"; then
+            echo "::error::the installed GUI crashed"
+            exit 1
+          fi
+          echo "GUI exited $GUI_RC without reaching the network"
+          rm -rf "$WORK"
+
+  # ------------------------------------------------------------ apk-emulator
+  # The .apk in ITS OWN environment: a real Android runtime.
+  #
+  # The published v1.3.2 APK was a red error screen on launch, because the
+  # APK's Python runtime had telethon in it and NO flet -- `flet build apk`
+  # installs [project].dependencies, and flet is an extra, so it was never
+  # installed and `import flet` died on the first line of the app. Nothing
+  # in the suite could see it, because nothing ever ran the .apk.
+  apk-emulator:
+    needs: [apk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the .apk
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk
+          path: dist
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot an emulator and launch the app
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_6
+          script: .github/workflows/apk-smoke.sh
+          disable-animations: true
+      - name: Fail on a fatal error in the app's log
+        if: always()
+        run: |
+          adb logcat -d -v brief 2>/dev/null \
+            | grep -iE "FATAL EXCEPTION|AndroidRuntime|Traceback \(most recent call last\)" \
+            | grep -iE "telegram|Downloader|chaquopy|python" || true
 
   # ----------------------------------------------------------------- release
   # Single release job: the build jobs upload their artifacts; this job
