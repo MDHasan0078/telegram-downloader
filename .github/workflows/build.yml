@@ -321,17 +321,27 @@ jobs:
           GUI_RC=$?
           set -e
           cat "$WORK/gui.log"
-          # The GUI must NOT have tried to install anything, and it must not
-          # have crashed. It may legitimately exit non-zero (no display on a
-          # headless runner) -- what it must not do is reach the network or
-          # die with a traceback.
-          if grep -qiE "pip install|Could not reach the index|openapi_prefix" \
+          # Two things must never happen: the app must not reach the network
+          # (the .deb is built so that it cannot), and it must not die with a
+          # traceback. It MAY exit non-zero -- until the GTK GUI replaces
+          # Flet on the desktop, `tg-dl gui` refuses cleanly with exit 2 and
+          # a message naming the pip command, and that is the correct
+          # behaviour: the alternative is silently downloading a client.
+          #
+          # The markers below are pip's own, not the words "pip install":
+          # the refusal message contains "pip install" in its instructions,
+          # and matching that would fail every correct refusal.
+          if grep -qiE "Downloading [a-z]|Collecting [a-z]|Installing collected packages|Successfully installed|Could not reach the index|openapi_prefix" \
                "$WORK/gui.log"; then
             echo "::error::the installed GUI tried to fetch a client from PyPI"
             exit 1
           fi
           if grep -qE "Traceback \(most recent call last\)" "$WORK/gui.log"; then
             echo "::error::the installed GUI crashed"
+            exit 1
+          fi
+          if [ "$GUI_RC" != "0" ] && [ "$GUI_RC" != "2" ]; then
+            echo "::error::the installed GUI exited $GUI_RC"
             exit 1
           fi
           echo "GUI exited $GUI_RC without reaching the network"

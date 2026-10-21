@@ -189,15 +189,16 @@ echo "==> staged app dir: $(du -sh "$STAGE" | cut -f1) (the repo root is $(du -s
 # rather than a third copy inside the one people download.
 APK_ARCH="${APK_ARCH:-arm64-v8a}"
 
-# --output-dir puts the artifact back at build/apk, where the rest of this
+# --output puts the artifact back at build/apk, where the rest of this
 # script expects it, even though the app path is now the staged copy.
+# (The option is --output; flet's CLI does not accept --output-dir here.)
 if [ "${1:-}" = "--debug" ]; then
   flet build apk "$STAGE" --project telegram_downloader.gui --module-name main \
-    --arch "$APK_ARCH" --output-dir "$PWD/build/apk" \
+    --arch "$APK_ARCH" --output "$PWD/build/apk" \
     --flutter-build-args=--debug --yes
 else
   flet build apk "$STAGE" --project telegram_downloader.gui --module-name main \
-    --arch "$APK_ARCH" --output-dir "$PWD/build/apk" --yes
+    --arch "$APK_ARCH" --output "$PWD/build/apk" --yes
 fi
 rm -rf "$STAGE"
 
