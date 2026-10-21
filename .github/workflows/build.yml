@@ -803,6 +803,32 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: "${{ github.ref_name }}"
+          # The body is PREPENDED to GitHub's generated notes (that is what
+          # the API does when both are given), so the commit list is still
+          # there and the important lines are on top of it.
+          #
+          # UPDATE THIS when the next release is cut. It is here, and not
+          # in a file in the repo, because this job deliberately has no
+          # checkout: it may only download what the build jobs uploaded.
+          body: |
+            **If you installed v1.3.2 on a phone, that app was broken** —
+            it showed a red screen, because the release was published
+            without the GUI's own runtime. This release replaces it.
+            Sorry.
+
+            What else is in here:
+
+            * **The Linux app is new.** It is a native GTK4 interface now
+              rather than a Flutter one, and it is a fraction of the size.
+            * **The updater works again on Linux.** Every dialog in the
+              GTK app had been broken by a GTK4 API change, so "Check for
+              updates" did nothing at all.
+            * **The update download shows a progress bar** instead of
+              going quiet for the length of the download, on every
+              platform.
+            * **The file picker opens.** It was being registered as a
+              widget instead of as a service, so the phone's picker never
+              showed.
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ steps.assets.outputs.assets }}
