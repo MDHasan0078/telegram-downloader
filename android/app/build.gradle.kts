@@ -45,12 +45,29 @@ android {
 
     buildTypes {
         release {
-            // The Python engine is the product; shrinking it buys little and
-            // a reflection-heavy library (telethon) is exactly what R8 gets
-            // wrong. The APK is not minified.
-            isMinifyEnabled = false
+            // R8 IS worth running here, and the reason it was off was
+            // wrong: the Python engine is not in the DEX at all. It is in
+            // assets/chaquopy/*.imy -- .py files and compiled extensions --
+            // which R8 never sees and cannot break. The DEX holds the
+            // Kotlin app and the Compose libraries, and unshrunk those
+            // are 21.6 MB of a 33 MB APK.
+            //
+            // The plain default file, NOT the "optimize" one: the
+            // optimized file assumes android.util.Log has no side
+            // effects and strips every call to it -- and the log line
+            // that says the Python engine is ready is exactly what the
+            // CI launch check greps for.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android.txt"),
+                "proguard-rules.pro",
+            )
         }
         debug {
+            // The debug build is not minified: it is what the emulator
+            // job uses to check the app runs, and a shrunk build is
+            // much harder to read a stack trace out of.
             isMinifyEnabled = false
         }
     }

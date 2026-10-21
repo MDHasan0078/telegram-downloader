@@ -524,31 +524,75 @@ jobs:
         uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           gradle-version: "8.13"
+      # The version the app reports, stamped from the tag.
+      #
+      # The in-app updater compares this against the release it finds, so
+      # a build whose version is whatever the file happened to say would
+      # offer an update to itself, forever.
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$VERSION" || { echo "bad tag version '$VERSION'"; exit 1; }
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
+          sed -i "s/^\( *\)versionName = \".*\"/\1versionName = \"$VERSION\"/" android/app/build.gradle.kts
+          grep -E "versionName = \"$VERSION\"" android/app/build.gradle.kts
       # The emulator's APK: x86_64, because the released one is arm64-only
       # and an arm64-only package cannot be installed on an x86_64 emulator.
-      # The same split the Flet build makes.
+      #
+      # It is the RELEASE variant, not the debug one, and that is the
+      # point: R8 rewrites the whole app, so a rule that is wrong there
+      # fails only in the build nobody installs. The emulator has to
+      # test the artifact that ships.
       - name: Build the native APK for the emulator (x86_64)
         working-directory: android
-        run: gradle --no-daemon :app:assembleDebug -PtgdAbis=x86_64
+        run: gradle --no-daemon :app:assembleRelease -PtgdAbis=x86_64
       # The APK that would ship: arm64-v8a only. The other two ABIs were
       # 80 MB of dead weight on a device that can only run one of them.
       - name: Build the native APK that ships (arm64-v8a)
         working-directory: android
         run: gradle --no-daemon :app:assembleRelease -PtgdAbis=arm64-v8a
+      # The release build is unsigned, and the emulator will not install
+      # an unsigned package. The debug key is not a secret -- it is on
+      # every Android developer's machine -- it is only here to make the
+      # package installable, so the SAME shrunk code can be run.
+      - name: Sign the emulator APK with a throwaway key
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/debug.keystore"
+          keytool -genkeypair -keystore "$KS" -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA \
+            -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --out dist/telegram-downloader-native-release-x86_64.apk \
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            dist/telegram-downloader-native-release-x86_64.apk
       - name: Collect the APKs
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-             dist/telegram-downloader-native-debug-x86_64.apk
           cp android/app/build/outputs/apk/release/app-release-unsigned.apk \
              dist/telegram-downloader-native-release-arm64-v8a.apk
           ls -la dist
+          # The size is a promise the project makes to the user, so it is
+          # checked rather than hoped for. 33 MB is what this was before
+          # R8; 40 MB is the ceiling, with room for the platform to grow.
+          SIZE=$(stat -c %s dist/telegram-downloader-native-release-arm64-v8a.apk)
+          echo "the release APK is $((SIZE / 1048576)) MB"
+          if [ "$SIZE" -gt 41943040 ]; then
+            echo "::error::the release APK is $((SIZE / 1048576)) MB, over the 40 MB ceiling"
+            exit 1
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apk-native-emulator
           path: |
-            dist/telegram-downloader-native-debug-x86_64.apk
+            dist/telegram-downloader-native-release-x86_64.apk
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apk-native
