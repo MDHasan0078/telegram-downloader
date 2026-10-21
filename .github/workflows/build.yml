@@ -305,7 +305,20 @@ jobs:
       - name: Install the distro GTK the package now depends on
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq python3-gi gir1.2-gtk-4.0 xvfb
+          sudo apt-get install -y -qq python3-gi gir1.2-gtk-4.0 \
+            adwaita-icon-theme xdg-utils xvfb imagemagick
+      - name: Start a virtual display
+        run: |
+          # GTK needs a display. The runner has none, and "Gtk couldn't be
+          # initialized" is a CRASH as far as the app is concerned, so the
+          # job has to give it one -- exactly as a real desktop does.
+          Xvfb :99 -screen 0 1400x900x24 >/dev/null 2>&1 &
+          for _ in $(seq 1 20); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.5
+          done
+          [ -e /tmp/.X11-unix/X99 ] || { echo "Xvfb did not start"; exit 1; }
+          echo "Xvfb is up on :99"
       - name: Install the artifact and run it offline
         run: |
           set -uo pipefail
@@ -329,37 +342,59 @@ jobs:
             XDG_DATA_HOME="$WORK/home/.local/share" "$WORK/run.sh" --version
           echo "--- the GUI, offline ---"
           set +e
+          # DISPLAY points at the Xvfb above, so GTK can open a real window.
+          # The GUI is a GUI: it does not exit on its own, so it is stopped
+          # by the timeout -- and being stopped by the timeout is the
+          # SUCCESS case, because it means it was still up.
           "${ISOLATE[@]}" env HOME="$WORK/home" \
-            XDG_DATA_HOME="$WORK/home/.local/share" \
-            PATH="/usr/bin:/bin" timeout 90 "$WORK/run.sh" gui \
-            > "$WORK/gui.log" 2>&1
+            XDG_DATA_HOME="$WORK/home/.local/share" DISPLAY=:99 \
+            PATH="/usr/bin:/bin" timeout 60 "$WORK/run.sh" gui \
+            > "$WORK/gui.log" 2>&1 &
+          GUI_PID=$!
+          sleep 25
+          # Grab the display while the app is up.
+          import -display :99 -window root "$WORK/gui.png" 2>/dev/null || true
+          wait $GUI_PID
           GUI_RC=$?
           set -e
           cat "$WORK/gui.log"
-          # Two things must never happen: the app must not reach the network
-          # (the .deb is built so that it cannot), and it must not die with a
-          # traceback. It MAY exit non-zero -- until the GTK GUI replaces
-          # Flet on the desktop, `tg-dl gui` refuses cleanly with exit 2 and
-          # a message naming the pip command, and that is the correct
-          # behaviour: the alternative is silently downloading a client.
+          # Three things must hold: the app must not have reached the
+          # network (the .deb is built so that it cannot), it must not have
+          # died with a traceback, and it must have actually PAINTED a
+          # window.
           #
           # The markers below are pip's own, not the words "pip install":
-          # the refusal message contains "pip install" in its instructions,
-          # and matching that would fail every correct refusal.
+          # a message that names the pip command contains that string, and
+          # matching it would fail a correct run.
           if grep -qiE "Downloading [a-z]|Collecting [a-z]|Installing collected packages|Successfully installed|Could not reach the index|openapi_prefix" \
                "$WORK/gui.log"; then
-            echo "::error::the installed GUI tried to fetch a client from PyPI"
+            echo "::error::the installed GUI tried to fetch something from PyPI"
             exit 1
           fi
           if grep -qE "Traceback \(most recent call last\)" "$WORK/gui.log"; then
             echo "::error::the installed GUI crashed"
             exit 1
           fi
-          if [ "$GUI_RC" != "0" ] && [ "$GUI_RC" != "2" ]; then
+          # 124 is `timeout` reporting that the app was still running when
+          # it stopped it -- which is the point.
+          if [ "$GUI_RC" != "0" ] && [ "$GUI_RC" != "124" ]; then
             echo "::error::the installed GUI exited $GUI_RC"
             exit 1
           fi
-          echo "GUI exited $GUI_RC without reaching the network"
+          # Did it paint? A blank screen has one or two colours; a rendered
+          # app has thousands.
+          if [ ! -s "$WORK/gui.png" ]; then
+            echo "::error::no screenshot: the GUI never opened a window"
+            exit 1
+          fi
+          COLOURS="$(identify -format '%k' "$WORK/gui.png" 2>/dev/null || echo 0)"
+          echo "the screen has $COLOURS distinct colours"
+          if [ "$COLOURS" -lt 20 ]; then
+            echo "::error::the GUI window was blank (only $COLOURS colours)"
+            exit 1
+          fi
+          cp "$WORK/gui.png" "$GITHUB_WORKSPACE/deb-gui.png" || true
+          echo "GUI exited $GUI_RC without reaching the network, and painted a window"
           rm -rf "$WORK"
 
   # ------------------------------------------------------------ apk-emulator
