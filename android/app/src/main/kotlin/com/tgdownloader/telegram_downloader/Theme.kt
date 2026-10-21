@@ -66,10 +66,16 @@ data class TgColors(
     val onError: Color,
     val errorWash: Color,
     val onErrorWash: Color,
+    // -- Android-only: elevation shadow and the scrim behind a modal.
+    //    GTK CSS has neither (the GTK design is tonal steps, not drop
+    //    shadows), so these exist only in this palette.
+    val shadow: Color,
+    val scrim: Color,
 )
 
 /** The palette, one entry per mode. Dark is the one the app ships in. */
 object TgPalette {
+    // BEGIN GENERATED palette
     val Dark = TgColors(
         wellDeep = Color(0xFF0F1318),
         well = Color(0xFF161B20),
@@ -95,6 +101,8 @@ object TgPalette {
         onError = Color(0xFF311210),
         errorWash = Color(0xFF46221F),
         onErrorWash = Color(0xFFFFB9B1),
+        shadow = Color(0xFF000000),
+        scrim = Color(0xFF000000).copy(alpha = 0.60f),
     )
 
     val Light = TgColors(
@@ -116,13 +124,16 @@ object TgPalette {
         onAccentWash = Color(0xFF005A64),
         success = Color(0xFF067E3F),
         onSuccess = Color(0xFFFFFFFF),
-        successWash = Color(0xFFD3F1F9),
+        successWash = Color(0xFFD3F1D9),
         onSuccessWash = Color(0xFF0A562B),
         error = Color(0xFFBE222A),
         onError = Color(0xFFFFFFFF),
         errorWash = Color(0xFFFFE0DC),
         onErrorWash = Color(0xFF90101A),
+        shadow = Color(0xFF000000),
+        scrim = Color(0xFF000000).copy(alpha = 0.35f),
     )
+    // END GENERATED palette
 }
 
 /**
@@ -130,6 +141,7 @@ object TgPalette {
  * component, 16/24/32 between blocks.
  */
 object Space {
+    // BEGIN GENERATED space
     val s1: Dp = 4.dp
     val s2: Dp = 8.dp
     val s3: Dp = 12.dp
@@ -143,6 +155,7 @@ object Space {
     val barHeight: Dp = 52.dp
     val rowPadH: Dp = 12.dp
     val rowPadV: Dp = 10.dp
+    // END GENERATED space
 }
 
 /**
@@ -151,10 +164,12 @@ object Space {
  * sheet.
  */
 object Radius {
+    // BEGIN GENERATED radius
     val sm: Dp = 6.dp
     val md: Dp = 10.dp
     val lg: Dp = 16.dp
     val full: Dp = 999.dp
+    // END GENERATED radius
 }
 
 /**
@@ -163,12 +178,14 @@ object Radius {
  * row title and its status line shouts where the eye only needs a nudge.
  */
 object Type {
-    val micro = 10.5.sp   // badges, chips
-    val meta = 11.5.sp    // status lines, captions, field hints
-    val label = 12.5.sp   // section labels, field labels
-    val body = 13.5.sp    // base: body copy, buttons, nav, inputs, values
-    val title = 14.5.sp   // row titles, the wordmark, dialog titles
-    val display = 22.sp   // empty-state headline
+    // BEGIN GENERATED type
+    val micro = 10.5.sp // badges, chips
+    val meta = 11.5.sp  // status lines, captions, field hints
+    val label = 12.5.sp // section labels, field labels
+    val body = 13.5.sp  // base: body copy, buttons, nav, inputs, values
+    val title = 14.5.sp // row titles, the wordmark, dialog titles
+    val display = 22.sp // empty-state headline
+    // END GENERATED type
 }
 
 /** The palette in force for the tree below this point. */

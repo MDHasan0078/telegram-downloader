@@ -64,6 +64,13 @@ jobs:
       # --no-build-isolation: the backend is the pinned setuptools installed
       # above, not one pip downloads and executes at this point.
       - run: pip install --no-build-isolation --no-deps -e . && python -m pytest -q
+      # The design tokens live once, in gtk/tokens.py, and the Android theme's
+      # numeric tokens are GENERATED from that file. Without this check, a
+      # palette change in the Python source and a hand-edited Kotlin copy drift
+      # apart silently, and the two apps end up a shade apart in colour with
+      # nothing to say so. `--check` fails if the checked-in Kotlin is stale.
+      - name: Check the Android theme is generated from the GTK tokens
+        run: python scripts/gen_android_theme.py --check
       # A reserved step key nested inside a `with:` makes GitHub reject the
       # WHOLE workflow: the run then fails with zero jobs, and the reason
       # appears only in the web UI. An `env:` block under `with:` did exactly

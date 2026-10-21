@@ -95,7 +95,7 @@ LIGHT = {
     "on_accent_wash": "#005A64",
     "success": "#067E3F",         # 4.9:1
     "on_success": "#FFFFFF",
-    "success_wash": "#D3F1F9",
+    "success_wash": "#D3F1D9",
     "on_success_wash": "#0A562B",
     "error": "#BE222A",           # 5.7:1
     "on_error": "#FFFFFF",
