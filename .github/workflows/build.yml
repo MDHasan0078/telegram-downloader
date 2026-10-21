@@ -548,18 +548,20 @@ jobs:
       - name: Build the native APK for the emulator (x86_64)
         working-directory: android
         run: gradle --no-daemon :app:assembleRelease -PtgdAbis=x86_64
-      # The APK that would ship: arm64-v8a only. The other two ABIs were
-      # 80 MB of dead weight on a device that can only run one of them.
-      - name: Build the native APK that ships (arm64-v8a)
-        working-directory: android
-        run: gradle --no-daemon :app:assembleRelease -PtgdAbis=arm64-v8a
       # The release build is unsigned, and the emulator will not install
       # an unsigned package. The debug key is not a secret -- it is on
       # every Android developer's machine -- it is only here to make the
       # package installable, so the SAME shrunk code can be run.
+      #
+      # It is signed HERE, immediately after its own build, because both
+      # ABIs are written to the SAME file in the build directory. Sign
+      # it later and you sign whichever build ran last and call it
+      # something else -- and the emulator cannot install an arm64
+      # package.
       - name: Sign the emulator APK with a throwaway key
         run: |
           set -euo pipefail
+          mkdir -p dist
           KS="$RUNNER_TEMP/debug.keystore"
           keytool -genkeypair -keystore "$KS" -storepass android \
             -alias androiddebugkey -keypass android -keyalg RSA \
@@ -572,13 +574,32 @@ jobs:
             android/app/build/outputs/apk/release/app-release-unsigned.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             dist/telegram-downloader-native-release-x86_64.apk
+      # The APK that would ship: arm64-v8a only. The other two ABIs were
+      # 80 MB of dead weight on a device that can only run one of them.
+      - name: Build the native APK that ships (arm64-v8a)
+        working-directory: android
+        run: gradle --no-daemon :app:assembleRelease -PtgdAbis=arm64-v8a
       - name: Collect the APKs
         run: |
           set -euo pipefail
           mkdir -p dist
+          # Copied out NOW, for the same reason the emulator APK is signed
+          # now: the next build with a different ABI overwrites this
+          # file.
           cp android/app/build/outputs/apk/release/app-release-unsigned.apk \
              dist/telegram-downloader-native-release-arm64-v8a.apk
           ls -la dist
+          # Each APK must be for the ABI it says it is. Both builds write
+          # to the same file, so a copy made in the wrong order ships the
+          # wrong architecture -- and an arm64 package cannot be
+          # installed on an x86_64 emulator, which fails as a mysterious
+          # "install failed" rather than as a wrong file.
+          unzip -l dist/telegram-downloader-native-release-x86_64.apk \
+            | grep -q "lib/x86_64/" \
+            || { echo "::error::the x86_64 APK has no x86_64 libraries"; exit 1; }
+          unzip -l dist/telegram-downloader-native-release-arm64-v8a.apk \
+            | grep -q "lib/arm64-v8a/" \
+            || { echo "::error::the arm64 APK has no arm64 libraries"; exit 1; }
           # The size is a promise the project makes to the user, so it is
           # checked rather than hoped for. 33 MB is what this was before
           # R8; 40 MB is the ceiling, with room for the platform to grow.
