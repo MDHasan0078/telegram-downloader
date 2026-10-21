@@ -489,6 +489,15 @@ jobs:
         run: |
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+      # Chaquopy's pip installs pyaes from the vendored wheel set (it is
+      # published as an sdist only, and Chaquopy's pip will not build one),
+      # so those wheels are part of what this artifact is made of. Verify
+      # them before the build, exactly as scripts/build-apk.sh does for the
+      # Flet APK: a tampered or substituted wheel must abort the build, not
+      # be installed.
+      - name: Verify the vendored wheels
+        run: |
+          ( cd wheels && sha256sum -c --quiet SHA256SUMS )
       # There is no Gradle wrapper in android/ (a wrapper needs a binary jar
       # that cannot be reviewed), so the exact Gradle version is pinned here
       # instead. AGP 8.13.2 needs Gradle 8.13 and JDK 17.

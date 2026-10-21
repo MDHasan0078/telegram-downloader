@@ -75,21 +75,27 @@ chaquopy {
     defaultConfig {
         version = chaquopyPythonVersion
 
+        // The vendored wheel set, for pyaes.
+        //
+        // pyaes is published as an SDIST ONLY, and Chaquopy's pip will not
+        // build one, so telethon's dependency simply is not on PyPI as a
+        // wheel:
+        //
+        //     ERROR: Could not find a version that satisfies the
+        //            requirement pyaes (from telethon) (from versions: none)
+        //
+        // The vendored set has it -- pyaes is pure Python (py3-none-any),
+        // so the same artifact works on Android exactly as it does on
+        // Linux. scripts/build-apk.sh solves the same problem for the
+        // Flet build with PIP_FIND_LINKS, and the CI job verifies
+        // wheels/SHA256SUMS before either build runs.
+        val vendoredWheels = rootProject.file("../wheels").absolutePath
+
         pip {
             // telethon==1.45.0 is the EXACT pin the .deb ships (see
             // pyproject.toml and requirements-runtime.lock): one tag must not
             // produce three artifacts with three different telethons.
-            //
-            // Its dependency pyaes is published as an SDIST ONLY, so it has
-            // to be built from source. That is the same problem
-            // scripts/build-apk.sh has to solve for the Flet build, and the
-            // same answer applies: pyaes is pure Python, so building it
-            // needs no NDK and no toolchain.
-            //
-            // cryptg is deliberately NOT installed. It is a compiled C
-            // extension -- a build problem on every ABI -- and telethon
-            // falls back to pure-Python crypto without it. The Settings
-            // screen says so plainly instead of pretending it is there.
+            options("--find-links=$vendoredWheels")
             install("telethon==1.45.0")
         }
     }
