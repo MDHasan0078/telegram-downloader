@@ -34,6 +34,21 @@ pluggy==1.6.0 \
     --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
 pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+# PyYAML is the test tooling's YAML reader. It is here because
+# scripts/check_workflow_inputs.py parses the workflow to check every action
+# step's `with:` keys -- a reserved step key nested in there (an `env:`
+# block, say) makes GitHub reject the WHOLE workflow, and the run then
+# fails with zero jobs and a message that exists only in the web UI.
+#
+# PyYAML 6.0.3 ships no universal wheel, so the hash of every supported
+# CPython's manylinux x86_64 wheel is listed. The sdist is deliberately
+# NOT listed: --only-binary :all: must not silently build it.
+pyyaml==6.0.3 \
+    --hash=sha256:9c7708761fccb9397fe64bbc0395abcae8c4bf7b0eac081e12b809bf47700d0b \
+    --hash=sha256:b8bb0864c5a28024fac8a632c443c87c5aa6f215c0b126c449ae1a150412f31d \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc \
+    --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6 \
+    --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5
 pytest==9.1.1 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
 pytest-asyncio==1.4.0 \
