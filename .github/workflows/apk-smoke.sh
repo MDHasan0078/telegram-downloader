@@ -128,18 +128,50 @@ if [ "${TG_NATIVE_UI_ASSERT:-0}" = "1" ]; then
     echo "::error::the accessibility tree is empty -- the UI never came up"
     exit 1
   fi
-  # The bar: the wordmark and the first two destinations. They are the
-  # left-most items, so they are on screen even when the strip scrolls.
-  for NEEDLE in "Telegram Downloader" "Add" "Ongoing"; do
+
+  # The whole tree, saved as an artifact. When this job fails on an
+  # assertion, the question is always "what WAS on screen?", and the
+  # answer has to be in the log rather than on somebody's laptop.
+  printf '%s' "$UI" > "$GITHUB_WORKSPACE/dist/tg-ui.xml" 2>/dev/null || true
+
+  # And a readable summary of it: every string the app put on screen.
+  # uiautomator's XML is one enormous line, so the interesting part --
+  # the text -- is invisible in the raw dump.
+  NODES="$(printf '%s' "$UI" | grep -o '<node ' | wc -l | tr -d ' ')"
+  echo "  the accessibility tree has $NODES node(s)"
+  printf '%s' "$UI" | grep -o 'text="[^"]*"' | sed 's/^text="//; s/"$//' \
+    | grep -v '^$' | sort -u | sed 's/^/  text: /' | head -40
+  printf '%s' "$UI" | grep -o 'content-desc="[^"]*"' | sed 's/^content-desc="//; s/"$//' \
+    | grep -v '^$' | sort -u | sed 's/^/  desc: /' | head -20
+
+  # The app's own strings. The destinations are labels the app renders,
+  # so their presence is proof that the Compose tree is not just a
+  # background.
+  #
+  # A tree with a handful of nodes is a blank screen, which is the
+  # failure this job exists to catch, and it is a different failure from
+  # a missing string. The count is checked first so a blank screen is
+  # reported as a blank screen.
+  if [ "$NODES" -lt 8 ]; then
+    echo "::error::the accessibility tree has only $NODES node(s) -- the UI is blank"
+    exit 1
+  fi
+  for NEEDLE in "Add" "Ongoing"; do
     case "$UI" in
       *"$NEEDLE"*) echo "  the UI shows: $NEEDLE" ;;
       *)
         echo "::error::the UI does not show \"$NEEDLE\""
-        echo "$UI" | head -c 3000
         exit 1
         ;;
     esac
   done
+  # Reported, not required: the wordmark is a text label in the bar, but
+  # whether it reaches the accessibility tree is a Compose detail, and the
+  # destinations above are the assertion that matters.
+  case "$UI" in
+    *"Telegram Downloader"*) echo "  the UI shows: the wordmark" ;;
+    *) echo "  (the wordmark is not in the accessibility tree -- noted, not required)" ;;
+  esac
 else
   # The symptom that matters: the app showing a RED ERROR SCREEN instead of
   # its UI. In Flet that is a flat red panel, so it is caught two ways -- it

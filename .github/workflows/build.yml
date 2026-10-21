@@ -588,6 +588,19 @@ jobs:
           timeout 60 adb logcat -d -v brief 2>/dev/null \
             | grep -iE "FATAL EXCEPTION|AndroidRuntime|Traceback \(most recent call last\)|TgBridge" \
             | tail -40 || echo "(no fatal error in the log)"
+      # What the app actually drew. A launch check that fails tells you
+      # THAT it failed; the screenshot and the accessibility tree are what
+      # tell you WHY, and they are the only way to see the app without
+      # a device in your hand.
+      - name: Upload what the app drew
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-native-screen
+          path: |
+            dist/apk-launch.png
+            dist/tg-ui.xml
+          if-no-files-found: ignore
 
   # ----------------------------------------------------------------- release
   # Single release job: the build jobs upload their artifacts; this job
