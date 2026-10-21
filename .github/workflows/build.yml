@@ -612,6 +612,8 @@ jobs:
           path: |
             dist/apk-launch.png
             dist/tg-ui.xml
+            dist/screen-*.png
+            dist/screen-*.xml
           if-no-files-found: ignore
 
   # ----------------------------------------------------------------- release

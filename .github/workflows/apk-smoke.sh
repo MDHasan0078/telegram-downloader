@@ -172,6 +172,18 @@ if [ "${TG_NATIVE_UI_ASSERT:-0}" = "1" ]; then
     *"Telegram Downloader"*) echo "  the UI shows: the wordmark" ;;
     *) echo "  (the wordmark is not in the accessibility tree -- noted, not required)" ;;
   esac
+
+  # Every screen, not just the one the app opens on.
+  #
+  # The bar is on every screen, so a bar that is wrong is wrong on all
+  # of them -- and the launch check looked at one. This walks the
+  # destinations, taps each one by its own label, captures it, and
+  # asserts that each screen shows its OWN content: a destination that
+  # still shows the previous screen is a broken app that no screenshot
+  # of one screen would ever reveal.
+  echo "==> every screen"
+  python3 "$GITHUB_WORKSPACE/scripts/android-screens.py" \
+    --out "$GITHUB_WORKSPACE/dist" || exit 1
 else
   # The symptom that matters: the app showing a RED ERROR SCREEN instead of
   # its UI. In Flet that is a flat red panel, so it is caught two ways -- it
