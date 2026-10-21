@@ -184,10 +184,14 @@ echo "==> staged app dir: $(du -sh "$STAGE" | cut -f1) (the repo root is $(du -s
 # were 80.6 MB of the 153 MB, and they are dead weight on a device that
 # can only ever run one of them.
 #
-# arm64-v8a is the only ABI that matters for a phone. An x86_64 build is
-# still wanted for the emulator, so it is a separate, opt-in artifact
-# rather than a third copy inside the one people download.
+# arm64-v8a is the only ABI that matters for a phone, so that is the one
+# that ships. The emulator still needs an x86_64 APK, and an arm64-only
+# package cannot be installed on an x86_64 emulator -- so a second,
+# x86_64-only build is produced for CI, into its own directory, and never
+# near the artifact people download.
 APK_ARCH="${APK_ARCH:-arm64-v8a}"
+# Set to 1 to also build the x86_64 APK the emulator job installs.
+APK_EMULATOR_ARCH="${APK_EMULATOR_ARCH:-x86_64}"
 
 # --output puts the artifact back at build/apk, where the rest of this
 # script expects it, even though the app path is now the staged copy.
@@ -201,6 +205,26 @@ else
     --arch "$APK_ARCH" --output "$PWD/build/apk" --yes
 fi
 rm -rf "$STAGE"
+
+# The emulator's APK, if asked for. The Flutter/Gradle caches are warm from
+# the build above, so this is a rebuild of one ABI rather than a second
+# cold build.
+if [ "${APK_BUILD_EMULATOR:-0}" = "1" ]; then
+  echo "==> building the $APK_EMULATOR_ARCH APK for the emulator"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE"
+  cp main.py pyproject.toml LICENSE "$STAGE/"
+  cp -r src "$STAGE/src"
+  rm -rf "$STAGE"/src/*.egg-info
+  find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  flet build apk "$STAGE" --project telegram_downloader.gui \
+    --module-name main --arch "$APK_EMULATOR_ARCH" \
+    --output "$PWD/build/apk-emulator" --yes
+  rm -rf "$STAGE"
+  mkdir -p dist/apk-emulator
+  find build/apk-emulator -maxdepth 1 -name '*.apk' -exec cp {} dist/apk-emulator/ \;
+  rm -rf build/apk-emulator
+fi
 
 # --------------------------------------------- move artifacts out of build/
 # Flet leaves its output in build/apk. Copy it into dist/ and delete build/ so

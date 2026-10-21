@@ -220,7 +220,14 @@ jobs:
           else
             echo "no APK upload key configured; shipping an unsigned .apk" >> "$GITHUB_STEP_SUMMARY"
           fi
-      - run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh
+      # One invocation builds BOTH the released APK (arm64-v8a) and the
+      # emulator's (x86_64). They have to be one invocation: the script
+      # clears build/ and dist/ at the top, so a second run would throw
+      # away the first one's output.
+      - name: Build the APKs
+        env:
+          APK_BUILD_EMULATOR: "1"
+        run: chmod +x scripts/build-apk.sh && ./scripts/build-apk.sh
       - name: Rename APK to versioned release name
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -254,6 +261,14 @@ jobs:
             --out "${APK[0]}" "${APK[0]}.aligned"
           rm -f "${APK[0]}.aligned" "$RUNNER_TEMP/upload.jks"
           "$BT/apksigner" verify --verbose --print-certs "${APK[0]}"
+      # The emulator's own APK: the released one is arm64-v8a only, and an
+      # arm64-only package cannot be installed on an x86_64 emulator.
+      - name: Upload the emulator APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-emulator
+          path: |
+            dist/apk-emulator/*.apk
       # Uploaded on branch pushes too, for the same reason as the .deb: the
       # apk-emulator job installs this artifact on a real Android runtime.
       # Signing is still tag-only, so a branch build is an unsigned .apk.
@@ -358,14 +373,17 @@ jobs:
   apk-emulator:
     needs: [apk]
     runs-on: ubuntu-latest
+    # An emulator that cannot boot, or an adb that cannot reach a device,
+    # must not hold the pipeline open forever.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Download the .apk
+      - name: Download the emulator APK
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: apk
+          name: apk-emulator
           path: dist
       - name: Enable KVM
         run: |
@@ -381,12 +399,16 @@ jobs:
           profile: pixel_6
           script: .github/workflows/apk-smoke.sh
           disable-animations: true
-      - name: Fail on a fatal error in the app's log
+      - name: Report the log
+        # The script already fails the job on a fatal error; this step only
+        # prints what was found. `timeout` because adb waits for a device
+        # that may not be there, and a job that hangs is worse than a job
+        # that fails.
         if: always()
         run: |
-          adb logcat -d -v brief 2>/dev/null \
+          timeout 60 adb logcat -d -v brief 2>/dev/null \
             | grep -iE "FATAL EXCEPTION|AndroidRuntime|Traceback \(most recent call last\)" \
-            | grep -iE "telegram|Downloader|chaquopy|python" || true
+            | tail -40 || echo "(no fatal error in the log)"
 
   # ----------------------------------------------------------------- release
   # Single release job: the build jobs upload their artifacts; this job
