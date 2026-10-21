@@ -64,6 +64,13 @@ jobs:
       # --no-build-isolation: the backend is the pinned setuptools installed
       # above, not one pip downloads and executes at this point.
       - run: pip install --no-build-isolation --no-deps -e . && python -m pytest -q
+      # A reserved step key nested inside a `with:` makes GitHub reject the
+      # WHOLE workflow: the run then fails with zero jobs, and the reason
+      # appears only in the web UI. An `env:` block under `with:` did exactly
+      # that, and the pipeline looked broken for a reason nobody could read.
+      # This checks every action step before the run does.
+      - name: Check the workflow's action steps
+        run: python scripts/check_workflow_inputs.py
       # The updater was dead for weeks because CI signed with GPG (.asc) while
       # the app fetched Ed25519 (.sig), and nothing caught it until a user
       # tried to install. This fails the run HERE instead: the key in the
@@ -547,16 +554,18 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Boot an emulator and launch the app
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        # `env` is a STEP-level key, not an input of the action. Nested
+        # under `with:` it is an unknown input, and GitHub rejects the
+        # WHOLE workflow for it -- the run fails with zero jobs, and the
+        # only place the reason appears is the web UI.
+        env:
+          TG_NATIVE_UI_ASSERT: "1"
         with:
           api-level: 34
           arch: x86_64
           profile: pixel_6
           script: .github/workflows/apk-smoke.sh
           disable-animations: true
-          # The native app renders into the accessibility tree, so the UI
-          # can be asserted -- which a Flutter app cannot do.
-          env:
-            TG_NATIVE_UI_ASSERT: "1"
       - name: Report the log
         if: always()
         run: |
