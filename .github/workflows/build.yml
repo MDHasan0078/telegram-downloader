@@ -409,6 +409,18 @@ jobs:
           fi
           cp "$WORK/gui.png" "$GITHUB_WORKSPACE/deb-gui.png" || true
           echo "GUI exited $GUI_RC without reaching the network, and painted a window"
+          # Every dialog in the GUI really opens.
+          #
+          # Painting a window is not enough to catch a broken dialog.
+          # GTK4 removed Gtk.Dialog.run() and Gtk.Widget.show_all(), and
+          # every dialog in this app used both -- so every one of them
+          # raised AttributeError the moment it was opened. The exception
+          # was swallowed by the button that raised it, so the symptom was
+          # not a crash: it was a button that did nothing at all. The app
+          # looked perfect and every dialog was broken.
+          echo "--- the dialogs ---"
+          HOME="$WORK/home" DISPLAY=:99 \
+            "$APP/.venv/bin/python" scripts/check-gtk-dialogs.py
           rm -rf "$WORK"
 
   # ------------------------------------------------------------ apk-emulator

@@ -29,7 +29,7 @@ from __future__ import annotations
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
 from . import tokens as T  # noqa: E402
 
@@ -56,6 +56,36 @@ _STATUS_CLASS = {
 # ---------------------------------------------------------------------------
 # structure
 # ---------------------------------------------------------------------------
+
+def run_dialog(dialog: Gtk.Dialog) -> int:
+    """Run a dialog until it answers, and return the response.
+
+    GTK4 REMOVED `Gtk.Dialog.run()`. Every dialog in this app used it, so
+    every dialog raised AttributeError the moment it was opened -- the
+    update dialog, the confirmation, the prompt. The exception was
+    swallowed by the button that raised it, so the symptom was a button
+    that did nothing at all.
+
+    This is the replacement: a nested main loop, which is what `run()`
+    was. The nesting matters -- the window stays alive, the timers keep
+    firing and the rest of the app keeps working while the dialog is up.
+    A dialog that froze the app would be a different bug, not a fix.
+
+    It must be called on the GTK thread: a main loop belongs to the
+    thread that started it.
+    """
+    result = {"response": Gtk.ResponseType.CANCEL}
+    loop = GLib.MainLoop()
+
+    def _on_response(_d, response):
+        result["response"] = response
+        loop.quit()
+
+    dialog.connect("response", _on_response)
+    dialog.show()
+    loop.run()
+    return result["response"]
+
 
 def hbox(spacing: int = T.S2, **kwargs) -> Gtk.Box:
     return Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=spacing,

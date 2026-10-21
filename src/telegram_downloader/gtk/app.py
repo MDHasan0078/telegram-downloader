@@ -346,7 +346,7 @@ class App(Gtk.Application):
 
     def prompt(self, title: str, body: str, field_label: str, *,
                password: bool = False, ok_label: str = "OK",
-               icon: str | None = None) -> str | None:
+               icon: str | None = None, value: str = "") -> str | None:
         """A modal prompt. Returns the text, or None if cancelled.
 
         Blocking, but it runs on the GTK thread and the caller is a GTK
@@ -365,13 +365,14 @@ class App(Gtk.Application):
         if body:
             body_box.append(w.label(body, role="body", wrap=True))
         entry = Gtk.Entry()
+        entry.set_text(value or "")
         if password:
             entry.set_visibility(False)
             entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
         body_box.append(w.field(entry, label_text=field_label))
         dialog.get_content_area().append(body_box)
-        dialog.show_all()
-        response = dialog.run()
+        dialog.show()
+        response = w.run_dialog(dialog)
         text = entry.get_text().strip() if response == Gtk.ResponseType.OK else None
         entry.set_text("")
         dialog.destroy()
@@ -379,7 +380,13 @@ class App(Gtk.Application):
 
     def confirm(self, title: str, body: str, *, ok_label: str = "OK",
                 danger: bool = False) -> bool:
-        """A yes/no confirmation."""
+        """A yes/no confirmation.
+
+        Blocking, so it runs on the GTK thread and the caller is a GTK
+        callback. For a caller on the engine's loop, use ask() or
+        confirm_async() -- a main loop belongs to the thread that
+        started it.
+        """
         dialog = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button(ok_label, Gtk.ResponseType.OK)
@@ -391,10 +398,36 @@ class App(Gtk.Application):
         body_box.set_margin_end(T.S5)
         body_box.append(w.label(body, role="body", wrap=True))
         dialog.get_content_area().append(body_box)
-        dialog.show_all()
-        response = dialog.run()
+        response = w.run_dialog(dialog)
         dialog.destroy()
         return response == Gtk.ResponseType.OK
+
+    def confirm_async(self, title: str, body: str, *, callback,
+                      ok_label: str = "OK", danger: bool = False) -> None:
+        """A yes/no confirmation that does not block.
+
+        The callback gets True or False. This is the one to use from the
+        engine's loop: the dialog is built and shown on the GTK thread
+        and the answer comes back through the callback.
+        """
+        dialog = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button(ok_label, Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+        body_box = w.vbox(spacing=T.S3)
+        body_box.set_margin_top(T.S4)
+        body_box.set_margin_bottom(T.S4)
+        body_box.set_margin_start(T.S5)
+        body_box.set_margin_end(T.S5)
+        body_box.append(w.label(body, role="body", wrap=True))
+        dialog.get_content_area().append(body_box)
+
+        def _done(_d, response):
+            dialog.destroy()
+            callback(response == Gtk.ResponseType.OK)
+
+        dialog.connect("response", _done)
+        dialog.show()
 
     def ask(self, title: str, body: str, field_label: str, *,
             password: bool = False, ok_label: str = "OK") -> "asyncio.Future":
@@ -449,7 +482,7 @@ class App(Gtk.Application):
             dialog.destroy()
             callback(text)
         dialog.connect("response", _done)
-        dialog.show_all()
+        dialog.show()
 
 
 def run_gtk() -> int:

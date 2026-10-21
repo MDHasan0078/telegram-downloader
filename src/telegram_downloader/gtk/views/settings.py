@@ -8,16 +8,18 @@ bottom of the window, so there is one place to change one value.
 from __future__ import annotations
 
 import asyncio
+import os
 
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from ... import deps as deps_mod
 from ... import updates
 from ...config import load_settings, save_settings
 from ...converter import ffmpeg_version
+from ...telegram_utils import format_bytes
 from .. import tokens as T
 from .. import widgets as w
 
@@ -42,6 +44,14 @@ class SettingsView:
     def __init__(self, app):
         self.app = app
         self.engine = app.engine
+        # The update download, in flight. A plain dict, written by the
+        # download thread and read by the poller on the GTK thread: the
+        # worker never touches a widget, and the GTK thread never waits.
+        self._update_progress = {"done": 0, "total": 0, "finished": False}
+        self._progress_bar = None
+        self._progress_detail = None
+        self._progress_dialog = None
+        self._progress_timer = None
         self._build()
 
     # -- construction -----------------------------------------------------
@@ -182,7 +192,10 @@ class SettingsView:
             clipboard.set(text)
             self.app.toast("Command copied.")
         except Exception:
-            self.app.prompt("Copy this command", "", "", value=text)
+            # The clipboard is not always there. Show the text instead, so
+            # it can still be copied by hand.
+            self.app.prompt_async("Copy this command", "", "",
+                                  callback=lambda _text: None, value=text)
 
     # -- about ------------------------------------------------------------
 
@@ -198,10 +211,13 @@ class SettingsView:
         if not info.is_newer_than(app_version()):
             self.app.toast(f"You are up to date (v{app_version()}).")
             return
-        self._update_dialog(info)
+        # The dialog is a GTK widget, and this coroutine is on the engine's
+        # loop. GTK wants its widgets touched on the main thread, so the
+        # dialog is built there.
+        self.engine.call_soon(self._update_dialog, info)
 
     def _update_dialog(self, info) -> None:
-        """Later / Open page / Download."""
+        """Later / Open page / Download. Runs on the GTK thread."""
         dialog = Gtk.Dialog(title="Update available", transient_for=self.app.window,
                             modal=True)
         dialog.add_button("Later", Gtk.ResponseType.CANCEL)
@@ -216,8 +232,7 @@ class SettingsView:
                             f"available (you have {app_version()}).",
                             role="body", wrap=True))
         dialog.get_content_area().append(body)
-        dialog.show_all()
-        response = dialog.run()
+        response = w.run_dialog(dialog)
         dialog.destroy()
         if response == Gtk.ResponseType.ACCEPT:
             try:
@@ -225,11 +240,75 @@ class SettingsView:
             except Exception as exc:
                 self.app.toast(f"Cannot open browser: {exc}", error=True)
         elif response == Gtk.ResponseType.APPLY:
+            self._update_progress.update(done=0, total=0, finished=False)
+            self._progress_open()
             self.engine.submit(self._download_installer(info))
 
+    def _progress_open(self) -> None:
+        """Build the progress dialog. Runs on the GTK thread.
+
+        The bar is the point: the download takes long enough that a toast
+        and silence reads as a broken app, which is exactly what the
+        updater looked like before the bar existed.
+        """
+        dialog = Gtk.Dialog(title="Downloading the update",
+                            transient_for=self.app.window, modal=True)
+        body = w.vbox(spacing=T.S3)
+        body.set_margin_top(T.S4)
+        body.set_margin_bottom(T.S4)
+        body.set_margin_start(T.S5)
+        body.set_margin_end(T.S5)
+        self._progress_bar = w.progress(None)
+        self._progress_detail = w.label("Starting…", role="meta")
+        body.append(self._progress_bar)
+        body.append(self._progress_detail)
+        dialog.get_content_area().append(body)
+        dialog.show()
+        self._progress_dialog = dialog
+        self._progress_timer = GLib.timeout_add(200, self._progress_poll)
+
+    def _progress_poll(self) -> bool:
+        """Paint the bar. Returns False to stop the timer.
+
+        The state is a plain dict the download thread writes and this
+        reads, so neither side ever touches the other's widget.
+        """
+        state = self._update_progress
+        done = int(state.get("done") or 0)
+        total = int(state.get("total") or 0)
+        if self._progress_bar is not None:
+            if total:
+                self._progress_bar.set_fraction(min(1.0, done / total))
+                self._progress_detail.set_text(
+                    f"{format_bytes(done)} of {format_bytes(total)}")
+            else:
+                # The size is not known yet: the bar pulses rather than
+                # sitting at zero, which reads as "stuck".
+                self._progress_bar.pulse()
+                self._progress_detail.set_text(f"{format_bytes(done)} downloaded")
+        if state.get("finished"):
+            self._progress_close()
+            return False
+        return True
+
+    def _progress_close(self) -> None:
+        """Take the dialog down. Runs on the GTK thread."""
+        if self._progress_timer is not None:
+            GLib.source_remove(self._progress_timer)
+            self._progress_timer = None
+        if self._progress_dialog is not None:
+            self._progress_dialog.destroy()
+            self._progress_dialog = None
+        self._progress_bar = None
+        self._progress_detail = None
+
     async def _download_installer(self, info) -> None:
-        """Download the installer. The verification is the shared updater's
-        -- it is not reimplemented here."""
+        """Download the installer, with the bar moving.
+
+        The verification is the shared updater's -- it is not reimplemented
+        here. The download runs on a worker thread and the bar is painted
+        by a poller on the GTK thread.
+        """
         from ...config import ensure_download_dir
         asset = updates.installable_asset(info)
         if asset is None:
@@ -240,18 +319,29 @@ class SettingsView:
             except Exception:
                 pass
             return
-        self.app.toast(f"Downloading {asset.name}...")
+
+        def _on_progress(done: int, total) -> None:
+            self._update_progress["done"] = int(done or 0)
+            if total:
+                self._update_progress["total"] = int(total)
+
         try:
-            token = ""
-            import os
             token = os.environ.get("GITHUB_TOKEN") or ""
             dest = await asyncio.to_thread(
                 updates.download_asset, asset,
                 ensure_download_dir(load_settings()), info.latest_version,
-                token or None)
+                token or None, progress=_on_progress)
         except Exception as exc:          # noqa: BLE001 - shown to the user
+            self._update_progress["finished"] = True
             self.app.toast(f"Download failed: {exc}", error=True)
             return
+        self._update_progress["finished"] = True
+        # The confirmation is a GTK dialog: it has to be built on the GTK
+        # thread, and this coroutine is on the engine's loop.
+        self.engine.call_soon(self._confirm_install, dest)
+
+    def _confirm_install(self, dest) -> None:
+        """Ask, then install. Runs on the GTK thread."""
         go = self.app.confirm(
             "Install this update?",
             f"Downloaded and verified:\n{os.path.basename(str(dest))}\n\n"
@@ -263,6 +353,9 @@ class SettingsView:
             self.app.toast(f"Installer saved to {dest}.")
             return
         self.app.toast("Installing… approve the password prompt to continue.")
+        self.engine.submit(self._install_and_restart(dest))
+
+    async def _install_and_restart(self, dest) -> None:
         ok, msg = await asyncio.to_thread(updates.install_deb, dest)
         if ok:
             self.app.toast(msg)
@@ -284,7 +377,7 @@ class SettingsView:
         from ...config import clear_session
         from ...config import Settings
 
-        phrase = self.app.prompt(
+        phrase = await self.app.ask(
             "Reset everything?",
             "This signs you out of Telegram, deletes your saved API "
             "credentials, and empties the download queue. Files already "
