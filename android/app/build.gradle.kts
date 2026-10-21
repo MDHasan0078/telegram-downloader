@@ -121,7 +121,18 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
 
-    implementation("androidx.core:core-ktx:1.19.1")
+    // androidx.core is pinned, and NOT to the newest release. core-ktx
+    // 1.19.1 declares minCompileSdk=37 and minAndroidGradlePluginVersion=
+    // 9.1.0, so it cannot be used with this project's compileSdk 36 and
+    // AGP 8.13.2 -- AGP refuses the build with "4 issues were found
+    // when checking AAR metadata". 1.18.0 declares minCompileSdk=36 and
+    // minAndroidGradlePluginVersion=8.9.1, which this project satisfies.
+    //
+    // The constraint was read out of the AARs themselves
+    // (META-INF/com/android/build/gradle/aar-metadata.properties), not
+    // guessed: 1.19.1 -> 37 / 9.1.0, 1.18.0 -> 36 / 8.9.1,
+    // 1.17.0 -> 36 / 8.9.1.
+    implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.activity:activity-compose:1.12.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
