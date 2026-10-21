@@ -426,6 +426,12 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - name: Install ImageMagick
+        # The smoke script reads the screenshot it takes: how many distinct
+        # colours are on it, and how red it is. That is how "the app shows
+        # Flet's red error panel instead of its UI" becomes a build failure
+        # rather than something a human has to notice.
+        run: sudo apt-get install -y -qq imagemagick
       - name: Boot an emulator and launch the app
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:

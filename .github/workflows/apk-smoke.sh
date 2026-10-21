@@ -15,31 +15,53 @@ set -uo pipefail
 APK="$(ls "$GITHUB_WORKSPACE"/dist/*.apk 2>/dev/null | head -1)"
 if [ -z "$APK" ]; then
   echo "no .apk in dist/"
+  ls -R "$GITHUB_WORKSPACE"/dist 2>/dev/null || true
   exit 1
 fi
 echo "==> installing $(basename "$APK")"
 adb install -r -g "$APK" || exit 1
 
-PKG="com.tgdownloader.telegram_downloader"
+# The package name is NOT hardcoded. Flet derives it from the Python
+# module -- telegram_downloader.gui becomes
+# com.tgdownloader.telegram_downloadergui -- and a hardcoded name that
+# does not match is exactly the kind of thing that breaks when a module is
+# renamed. Ask the package manager instead.
+PKG="$(adb shell pm list packages 2>/dev/null \
+        | tr -d '\r' | sed -n 's/^package:\(.*telegram[._]downloader.*\)$/\1/p' \
+        | head -1)"
+if [ -z "$PKG" ]; then
+  echo "::error::the app did not register a package after install"
+  adb shell pm list packages 2>/dev/null | grep -i telegram || true
+  exit 1
+fi
+echo "==> package: $PKG"
 
 adb logcat -c
-adb shell am force-stop "$PKG" || true
+adb shell am force-stop "$PKG" 2>/dev/null || true
 echo "==> launching"
-adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || \
-  adb shell am start -n "$PKG/.MainActivity" || true
+# `monkey` with the LAUNCHER category resolves whatever the real launch
+# activity is, so this does not depend on the activity's class name.
+adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 2>&1 | tail -3
 
 # Give the Python runtime time to start, import everything and build the
 # first frame. A crash lands here, in the first few seconds.
-sleep 25
+for _ in $(seq 1 18); do
+  sleep 2
+  if [ -n "$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; then
+    break
+  fi
+done
+sleep 6
 
 echo "==> logcat (app + python + flutter)"
 adb logcat -d -v brief 2>/dev/null \
   | grep -iE "chaquopy|python|flutter|telegram_downloader|AndroidRuntime|FATAL" \
-  | tail -60 || true
+  | tail -50 || true
 
 echo "==> process state"
-if adb shell pidof "$PKG" >/dev/null 2>&1 && [ -n "$(adb shell pidof "$PKG" 2>/dev/null)" ]; then
-  echo "the app process is ALIVE"
+PID="$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')"
+if [ -n "$PID" ]; then
+  echo "the app process is ALIVE (pid $PID)"
 else
   echo "::error::the app process is not running -- it died on launch"
   adb logcat -d -v brief 2>/dev/null | tail -80
@@ -58,5 +80,32 @@ if [ -n "$TRACEBACK" ]; then
 fi
 
 echo "==> taking a screenshot"
-adb exec-out screencap -p > "$GITHUB_WORKSPACE/dist/apk-launch.png" 2>/dev/null || true
-echo "OK: the app launched and stayed up"
+SHOT="$GITHUB_WORKSPACE/dist/apk-launch.png"
+adb exec-out screencap -p > "$SHOT" 2>/dev/null || true
+ls -la "$SHOT" 2>/dev/null || true
+
+# The symptom that matters: the app showing a RED ERROR SCREEN instead of
+# its UI. In Flet that is a flat red panel, so it is caught two ways -- it
+# has very few distinct colours (it is one red fill with a little text on
+# it), and its red channel dominates the whole frame.
+if [ -s "$SHOT" ]; then
+  COLOURS="$(identify -format '%k' "$SHOT" 2>/dev/null || echo 0)"
+  RED="$(convert "$SHOT" -format '%[fx:mean.r]' info: 2>/dev/null || echo 0)"
+  echo "the screen has $COLOURS distinct colours, mean red $RED"
+  if [ "$COLOURS" -lt 50 ]; then
+    echo "::error::the app shows a flat screen ($COLOURS colours) -- this is"
+    echo "::error::what the red error panel looks like; the UI never rendered"
+    exit 1
+  fi
+  # A red error panel is mostly red. The app is dark and mostly not.
+  if awk "BEGIN{exit !($RED > 0.35)}"; then
+    echo "::error::the screen is mostly red (mean red $RED) -- that is the"
+    echo "::error::Flet's error panel, not the app"
+    exit 1
+  fi
+else
+  echo "::error::no screenshot: the app did not render anything"
+  exit 1
+fi
+
+echo "OK: the app launched, stayed up, and rendered its UI"
