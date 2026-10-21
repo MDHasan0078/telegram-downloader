@@ -451,6 +451,119 @@ jobs:
             | grep -iE "FATAL EXCEPTION|AndroidRuntime|Traceback \(most recent call last\)" \
             | tail -40 || echo "(no fatal error in the log)"
 
+  # --------------------------------------------------------------- apk-native
+  # The NATIVE Android app: Kotlin/Compose over the SAME Python engine, with
+  # Chaquopy as the bridge. No socket, no HTTP, no Flutter.
+  #
+  # This does NOT replace the `apk` job above. That one builds the Flet/
+  # Flutter APK, and it is still the artifact the release publishes and the
+  # updater installs. This job builds the native APK and proves it runs on a
+  # real Android runtime. When the native app becomes the shipped artifact,
+  # the Flet job is removed DELIBERATELY in the same change -- the two are
+  # never left half-wired.
+  apk-native:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Chaquopy runs pip at BUILD time with a Python whose major.minor must
+      # match the app's. 3.12 is what requirements-runtime.lock pins, so the
+      # .apk and the .deb ship the same telethon.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: "3.12" }
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with: { distribution: temurin, java-version: "17" }
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      - name: Install the SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+      # There is no Gradle wrapper in android/ (a wrapper needs a binary jar
+      # that cannot be reviewed), so the exact Gradle version is pinned here
+      # instead. AGP 8.13.2 needs Gradle 8.13 and JDK 17.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: "8.13"
+      # The emulator's APK: x86_64, because the released one is arm64-only
+      # and an arm64-only package cannot be installed on an x86_64 emulator.
+      # The same split the Flet build makes.
+      - name: Build the native APK for the emulator (x86_64)
+        working-directory: android
+        run: gradle --no-daemon :app:assembleDebug -PtgdAbis=x86_64
+      # The APK that would ship: arm64-v8a only. The other two ABIs were
+      # 80 MB of dead weight on a device that can only run one of them.
+      - name: Build the native APK that ships (arm64-v8a)
+        working-directory: android
+        run: gradle --no-daemon :app:assembleRelease -PtgdAbis=arm64-v8a
+      - name: Collect the APKs
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             dist/telegram-downloader-native-debug-x86_64.apk
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk \
+             dist/telegram-downloader-native-release-arm64-v8a.apk
+          ls -la dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-native-emulator
+          path: |
+            dist/telegram-downloader-native-debug-x86_64.apk
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-native
+          path: |
+            dist/telegram-downloader-native-release-arm64-v8a.apk
+
+  # --------------------------------------------------------- apk-native-emulator
+  # The native APK in ITS OWN environment: a real Android runtime.
+  #
+  # This is the check the whole test suite cannot do for this app: that
+  # Chaquopy starts, that the engine's config directory is one the engine
+  # ACCEPTS on Android, and that the Compose UI actually came up.
+  apk-native-emulator:
+    needs: [apk-native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the emulator APK
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-native-emulator
+          path: dist
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Boot an emulator and launch the app
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_6
+          script: .github/workflows/apk-smoke.sh
+          disable-animations: true
+          # The native app renders into the accessibility tree, so the UI
+          # can be asserted -- which a Flutter app cannot do.
+          env:
+            TG_NATIVE_UI_ASSERT: "1"
+      - name: Report the log
+        if: always()
+        run: |
+          timeout 60 adb logcat -d -v brief 2>/dev/null \
+            | grep -iE "FATAL EXCEPTION|AndroidRuntime|Traceback \(most recent call last\)|TgBridge" \
+            | tail -40 || echo "(no fatal error in the log)"
+
   # ----------------------------------------------------------------- release
   # Single release job: the build jobs upload their artifacts; this job
   # downloads them, computes the checksums, and attaches everything to the tag

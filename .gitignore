@@ -61,3 +61,11 @@ release-signing.key.pem
 
 # flet build apk stages a trimmed copy of the app here (scripts/build-apk.sh)
 .apk-stage/
+
+# The native Android app (android/). `build/` above already covers the Gradle
+# build directories; these are the rest of Gradle's and the Kotlin plugin's
+# local state. local.properties points at the developer's own Android SDK.
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/captures/

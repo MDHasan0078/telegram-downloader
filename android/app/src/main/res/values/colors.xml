@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The page colour, so the window background matches the app's own
+         surface before Compose draws its first frame. The dark value is the
+         one the app ships in, like the desktop app. -->
+    <color name="tg_page">#1D2227</color>
+</resources>

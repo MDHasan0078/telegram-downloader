@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The platform theme, not an AppCompat one: the whole UI is Compose, so
+      the only thing the XML theme has to do is give the window a background
+      and no action bar.
+    -->
+    <style name="Theme.TelegramDownloader" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/tg_page</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

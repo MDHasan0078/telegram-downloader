@@ -84,11 +84,67 @@ SHOT="$GITHUB_WORKSPACE/dist/apk-launch.png"
 adb exec-out screencap -p > "$SHOT" 2>/dev/null || true
 ls -la "$SHOT" 2>/dev/null || true
 
-# The symptom that matters: the app showing a RED ERROR SCREEN instead of
-# its UI. In Flet that is a flat red panel, so it is caught two ways -- it
-# has very few distinct colours (it is one red fill with a little text on
-# it), and its red channel dominates the whole frame.
-if [ -s "$SHOT" ]; then
+if [ ! -s "$SHOT" ]; then
+  echo "::error::no screenshot: the app did not render anything"
+  exit 1
+fi
+
+if [ "${TG_NATIVE_UI_ASSERT:-0}" = "1" ]; then
+  # The NATIVE app (Kotlin/Compose over the same Python engine).
+  #
+  # The colour heuristic below is Flet's: it looks for the flat red error
+  # panel a Flutter app shows when its Python side dies. A Compose app has
+  # no such panel, and its dark surface has few distinct colours, so the
+  # heuristic would fail it for the wrong reason.
+  #
+  # What is checked instead is what actually matters here: the engine
+  # started IN-PROCESS (Chaquopy is up, and the engine accepted the config
+  # directory -- the Android-specific failure this job exists to catch),
+  # the app is the foreground activity, and the Compose tree is on screen.
+  echo "==> the engine started in-process?"
+  READY="$(adb logcat -d -v brief 2>/dev/null | grep -i "TgBridge" || true)"
+  if [ -z "$READY" ]; then
+    echo "::error::the app never reported a ready engine (Chaquopy or the config dir failed)"
+    adb logcat -d -v brief 2>/dev/null | tail -80
+    exit 1
+  fi
+  echo "$READY" | tail -5
+
+  echo "==> the app is the foreground activity?"
+  RESUMED="$(adb shell dumpsys activity activities 2>/dev/null \
+    | grep -iE "mResumedActivity|topResumedActivity" | head -1 || true)"
+  case "$RESUMED" in
+    *"$PKG"*) echo "  $RESUMED" ;;
+    *)
+      echo "::error::the app is not in the foreground: ${RESUMED:-<nothing resumed>}"
+      exit 1
+      ;;
+  esac
+
+  echo "==> the UI came up?"
+  UI="$(adb shell uiautomator dump /sdcard/tg-ui.xml >/dev/null 2>&1 \
+    && adb shell cat /sdcard/tg-ui.xml 2>/dev/null || true)"
+  if [ -z "$UI" ]; then
+    echo "::error::the accessibility tree is empty -- the UI never came up"
+    exit 1
+  fi
+  # The bar: the wordmark and the first two destinations. They are the
+  # left-most items, so they are on screen even when the strip scrolls.
+  for NEEDLE in "Telegram Downloader" "Add" "Ongoing"; do
+    case "$UI" in
+      *"$NEEDLE"*) echo "  the UI shows: $NEEDLE" ;;
+      *)
+        echo "::error::the UI does not show \"$NEEDLE\""
+        echo "$UI" | head -c 3000
+        exit 1
+        ;;
+    esac
+  done
+else
+  # The symptom that matters: the app showing a RED ERROR SCREEN instead of
+  # its UI. In Flet that is a flat red panel, so it is caught two ways -- it
+  # has very few distinct colours (it is one red fill with a little text on
+  # it), and its red channel dominates the whole frame.
   COLOURS="$(identify -format '%k' "$SHOT" 2>/dev/null || echo 0)"
   RED="$(convert "$SHOT" -format '%[fx:mean.r]' info: 2>/dev/null || echo 0)"
   echo "the screen has $COLOURS distinct colours, mean red $RED"
@@ -103,9 +159,6 @@ if [ -s "$SHOT" ]; then
     echo "::error::Flet's error panel, not the app"
     exit 1
   fi
-else
-  echo "::error::no screenshot: the app did not render anything"
-  exit 1
 fi
 
 echo "OK: the app launched, stayed up, and rendered its UI"

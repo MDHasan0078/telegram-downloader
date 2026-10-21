@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Telegram, the update server and the release API all need the network. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      No storage permission is requested, and none is needed.
+
+      The download folder is the app's OWN directory on the shared external
+      volume (`getExternalFilesDir(DIRECTORY_DOWNLOADS)`), which the app may
+      read and write on every Android version without a runtime permission.
+      The .txt batch file is read through the system file picker, which
+      grants access to the one file the user picked -- no permission, no
+      broad filesystem access.
+
+      That is the honest answer to "scoped storage": the engine writes
+      through the filesystem, so the folder it writes to has to be one the
+      app owns. The folder picker lets the user point at another local
+      folder, and the app checks that it can really write there before it
+      accepts it.
+    -->
+
+    <application
+        android:name=".TgApplication"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.TelegramDownloader">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenSizeSmallest|keyboardHidden|uiMode|density|fontScale"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
