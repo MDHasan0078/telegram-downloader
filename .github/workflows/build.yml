@@ -896,6 +896,9 @@ jobs:
             * **The file picker opens.** It was being registered as a
               widget instead of as a service, so the phone's picker never
               showed.
+            * **The Android package is a third of the size** it was:
+              139 MB in v1.3.2, 54 MB here. It is one architecture, and
+              the build no longer ships the source tree inside it.
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ steps.assets.outputs.assets }}

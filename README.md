@@ -190,10 +190,28 @@ src/telegram_downloader/
   cli.py             tg-dl command
   gui.py             Flet GUI (headless / HTTP serve; the desktop app is gtk/)
   gtk/              GTK4 GUI — the native desktop app
+  bridge.py          the Kotlin <-> Python bridge for the native Android app
+android/             the native Android app (Kotlin + Compose, Chaquopy)
+  app/src/main/kotlin/.../ui/   the screens
+  app/src/main/kotlin/.../Theme.kt  the design tokens (generated)
 tests/               pytest, no network required
 scripts/             install-deps.sh, build-deb.sh, build-apk.sh
 docs/                the screenshots used by this README
 ```
+
+### The two apps, one engine
+
+The Linux app and the Android app are different programs with the same
+Python behind them: `src/telegram_downloader/` is the engine, and the
+`gtk/` and `android/` directories are the two front ends for it. The
+Android app talks to it through `bridge.py` over Chaquopy, in the same
+process — no socket, no service.
+
+The design tokens live once, in `src/telegram_downloader/gtk/tokens.py`.
+The Android theme's numbers are GENERATED from it by
+`scripts/gen_android_theme.py`, and CI fails if the checked-in Kotlin
+has drifted from the generator — a palette edited on one side and not
+the other would ship two apps a shade apart, with nothing to say so.
 
 ## Releases
 
