@@ -38,8 +38,26 @@ __all__ = ["is_android", "point_config_at_writable_storage",
 
 
 def is_android() -> bool:
-    """CPython exposes `getandroidapilevel` only on Android."""
-    return hasattr(sys, "getandroidapilevel")
+    """Whether this is Android, however the app got there.
+
+    CPython exposes `getandroidapilevel` only on Android -- but only
+    from 3.13, and this project runs 3.12, so that test alone would
+    answer "not Android" on a 3.12 phone.
+
+    The Android runtime sets ANDROID_PRIVATE in EVERY app's
+    environment, whichever runtime the Python is embedded in. That
+    matters here because there are two: Chaquopy (the native app) and
+    serious_python (the Flet one). `platform.system()` says "Linux" on
+    a phone exactly as it does on a desktop, so it cannot tell the two
+    apart.
+
+    ANDROID_PRIVATE and not ANDROID_ROOT: the latter is the legacy name
+    for the Android SDK's directory, so it is set on a BUILD MACHINE
+    too, and this would report a CI runner as a phone.
+    """
+    if hasattr(sys, "getandroidapilevel"):
+        return True
+    return bool(os.environ.get("ANDROID_PRIVATE"))
 
 
 def writable_dirs() -> list[str]:

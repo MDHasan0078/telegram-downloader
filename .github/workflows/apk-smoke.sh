@@ -268,6 +268,36 @@ else
     echo "::error::Flet's error panel, not the app"
     exit 1
   fi
+
+  # The app's own content must start BELOW the phone's status bar.
+  #
+  # The page's padding is 0 -- the app draws its chrome edge to edge --
+  # so without a SafeArea the top bar begins at the very top of the
+  # screen and the clock, the battery and the signal sit ON the brand
+  # and the tabs. That is what a phone user sees, and nothing in the
+  # build noticed it: the app launched, and the window was full of the
+  # right colours.
+  #
+  # The topmost thing the app drew is the top of its own bar, and it has
+  # to be below the system bar. Any status bar is taller than 24
+  # pixels, so that is a wide margin: an app that draws under it is at
+  # 0, and one that respects it is at the bar's height.
+  TREE="$(adb shell uiautomator dump /sdcard/tg-flet-ui.xml >/dev/null 2>&1 \
+    && adb shell cat /sdcard/tg-flet-ui.xml 2>/dev/null || true)"
+  TOPMOST="$(printf '%s' "$TREE" | tr '<' '\n' \
+    | grep -oE 'text="[^"]+"[^>]*bounds="\[[0-9]+,[0-9]+\]' \
+    | grep -oE 'bounds="\[[0-9]+' | tr -dc '0-9' | head -1)"
+  if [ -n "$TOPMOST" ]; then
+    echo "  the app's topmost text starts at y=$TOPMOST"
+    if [ "$TOPMOST" -lt 24 ]; then
+      echo "::error::the app's own content starts at y=$TOPMOST, which is at"
+      echo "::error::the very top of the screen: the phone's status bar is"
+      echo "::error::drawn over the app's top bar"
+      exit 1
+    fi
+  else
+    echo "  (no text nodes in the tree; skipping the status bar check)"
+  fi
 fi
 
 echo "OK: the app launched, stayed up, and rendered its UI"

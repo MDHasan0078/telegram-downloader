@@ -144,6 +144,12 @@ class SettingsView:
         if rows_data is None:
             rows_data = deps_mod.check_all()
         for d in rows_data:
+            # A dependency that does not apply to this platform is not
+            # listed: there is nothing the user can do about it here, and
+            # a MISSING badge for it is an alarm about something the app
+            # cannot use.
+            if not getattr(d, "applicable", True):
+                continue
             row = w.hbox(spacing=T.S3)
             row.add_css_class("row")
             row.append(w.state_dot("done" if d.ok else "failed", size=9))

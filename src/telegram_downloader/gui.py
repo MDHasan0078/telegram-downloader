@@ -1681,6 +1681,13 @@ def run_gui(port=None, view=None):
                 rows_data = deps_mod.check_all()
             rows: list = []
             for d in rows_data:
+                # A dependency that does not apply to this platform is
+                # not listed. On a phone there is no shell and no package
+                # manager, so a MISSING badge for ffmpeg or cryptg is an
+                # alarm about something the user cannot act on -- and the
+                # app does not even offer the feature that would need it.
+                if not getattr(d, "applicable", True):
+                    continue
                 row = ui.list_row(
                     leading=ui.state_dot(ui.STATUS_DONE if d.ok
                                          else ui.STATUS_FAILED, size=9),
@@ -2524,14 +2531,27 @@ def run_gui(port=None, view=None):
         _set_selected_index(start_idx)
         body_content.content = views[start_idx]
 
-        page.add(ft.Column(
-            [
-                top_bar,
-                body,
-                dl_bar,
-            ],
-            expand=True,
-            spacing=0,
+        # The SafeArea is what keeps the phone's status bar OFF the top
+        # bar. The page's own padding is 0 (the app draws its own chrome
+        # edge to edge), so without it the top bar starts at the very top
+        # of the screen and the clock and the battery sit on top of the
+        # brand and the tabs.
+        #
+        # It is a no-op on a desktop, where there is no system bar to
+        # avoid, so the same code is right on both.
+        page.add(ft.SafeArea(
+            content=ft.Column(
+                [
+                    top_bar,
+                    body,
+                    dl_bar,
+                ],
+                expand=True,
+                spacing=0,
+            ),
+            # Keep the bottom inset when the keyboard opens, so the
+            # layout does not jump as the link field is typed into.
+            maintain_bottom_view_padding=True,
         ))
 
         # -- Responsive: re-layout on window resize (phone/tablet/desktop) ---

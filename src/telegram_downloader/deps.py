@@ -18,6 +18,23 @@ def _strip_ansi(s: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f]", "", s).strip()
 
 
+def _on_android() -> bool:
+    """Whether this is Android, and so has no shell to install anything.
+
+    `platform.system()` says "Linux" on a phone, and CPython's
+    `getandroidapilevel` only exists from 3.13 -- this project runs
+    3.12, and the Flet build embeds its Python through serious_python
+    rather than Chaquopy. `_android_paths.is_android()` knows both
+    cases: the Chaquopy one by its API, and the other by the
+    ANDROID_PRIVATE the Android runtime sets in every app.
+    """
+    try:
+        from ._android_paths import is_android
+        return is_android()
+    except Exception:
+        return False
+
+
 @dataclass
 class DepStatus:
     name: str
@@ -29,6 +46,17 @@ class DepStatus:
     install_windows: str = ""
     install_android: str = ""
     required: bool = False
+    # False for a dependency that does not apply to this platform AT ALL.
+    #
+    # A MISSING badge is a claim: "this is missing, and here is what to
+    # do about it". On a phone there is nothing the user can do -- no
+    # shell, no compiler, no package manager -- so a red MISSING badge
+    # for ffmpeg or cryptg is an alarm about something they cannot fix
+    # and the app does not even need. The row is left out of the list
+    # instead, and the truth about what the app CAN do is told where
+    # the user meets it: the output mode that needs ffmpeg is not
+    # offered on Android, and says so.
+    applicable: bool = True
 
     def install_for_current_os(self) -> str:
         sysname = platform.system().lower()
@@ -49,6 +77,7 @@ def _has_module(name: str) -> bool:
 
 def check_all() -> list[DepStatus]:
     results: list[DepStatus] = []
+    on_android = _on_android()
 
     # Python
     results.append(DepStatus(
@@ -78,11 +107,20 @@ def check_all() -> list[DepStatus]:
         name="ffmpeg (for MP4 modes 2/3)",
         ok=ff_ok,
         version=ff_ver,
-        hint="Original downloads (mode 1) work without ffmpeg. Install it for compression.",
+        hint=("Not available on Android: this app ships no ffmpeg and cannot "
+              "install one. Original downloads (mode 1) work without it; the "
+              "Fast and Max (MP4) modes cannot."
+              if on_android else
+              "Original downloads (mode 1) work without ffmpeg. Install it for compression."),
         install_linux="sudo apt install ffmpeg  # Debian/Ubuntu  |  sudo dnf install ffmpeg  |  sudo pacman -S ffmpeg",
         install_macos="brew install ffmpeg",
         install_windows="winget install Gyan.FFmpeg",
         install_android="pkg install ffmpeg",
+        # On a phone the app does not offer the MP4 modes at all, so ffmpeg
+        # is not a dependency of it. Listing it as MISSING would be an
+        # alarm about something the user cannot install and the app does
+        # not need.
+        applicable=not on_android,
     ))
 
     # Telethon (required)
@@ -109,11 +147,19 @@ def check_all() -> list[DepStatus]:
         name="cryptg (optional, faster transfers)",
         ok=_has_module("cryptg"),
         version="",
-        hint="Recommended by Telethon for faster crypto; app works without it.",
+        hint=("Not shipped on Android: cryptg is a compiled C extension. "
+              "Telethon's pure-Python crypto is used instead -- slower, but "
+              "it works."
+              if on_android else
+              "Recommended by Telethon for faster crypto; app works without it."),
         install_linux="pip install -U cryptg",
         install_macos="pip install -U cryptg",
         install_windows="pip install -U cryptg",
         install_android="pip install -U cryptg",
+        # Same reasoning as ffmpeg: a phone has no compiler and no
+        # package manager, so there is nothing the user can do about this
+        # one, and the app works without it.
+        applicable=not on_android,
     ))
 
     # flet (GUI only)

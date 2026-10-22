@@ -176,6 +176,31 @@ cp main.py pyproject.toml LICENSE "$STAGE/"
 cp -r src "$STAGE/src"
 rm -rf "$STAGE"/src/*.egg-info
 find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+# ------------------------------------------------------------------ the icon
+# The app's icon is an SVG (src/telegram_downloader/assets/icon.svg) and
+# flet CANNOT use one: its icon generator drops vector formats and falls
+# back to the Flutter default. So the APK shipped with Flutter's logo on
+# the home screen, which is the worst icon an app can have.
+#
+# It is rasterised here, at build time, from the SVG, so the SVG stays
+# the one source of the icon and the PNG can never drift from it. If the
+# rasteriser is missing the build FAILS rather than shipping the default
+# one: this is the package's actual icon, not a nicety.
+stage_assets() {
+  local dest="$1/assets"
+  mkdir -p "$dest"
+  if ! command -v rsvg-convert >/dev/null 2>&1; then
+    echo "build-apk.sh: rsvg-convert is missing (the package is librsvg2-bin)." >&2
+    echo "  The app's icon is an SVG and flet cannot use one, so without" >&2
+    echo "  this the APK ships with Flutter's default icon." >&2
+    exit 1
+  fi
+  rsvg-convert -w 512 -h 512 src/telegram_downloader/assets/icon.svg \
+    -o "$dest/icon.png"
+  echo "==> the icon: staged assets/icon.png (512x512, from the SVG)"
+}
+stage_assets "$STAGE"
 echo "==> staged app dir: $(du -sh "$STAGE" | cut -f1) (the repo root is $(du -sh . | cut -f1))"
 
 # ------------------------------------------------------------- one ABI only
@@ -196,12 +221,21 @@ APK_EMULATOR_ARCH="${APK_EMULATOR_ARCH:-x86_64}"
 # --output puts the artifact back at build/apk, where the rest of this
 # script expects it, even though the app path is now the staged copy.
 # (The option is --output; flet's CLI does not accept --output-dir here.)
+#
+# --product is the DISPLAY name: the name under the app's icon on the
+# home screen, the window title and the about box. Without it the name
+# falls back to --project, which is the Python module
+# ("telegram_downloader.gui") -- so the app on a phone was called
+# "Telegram_download.gy", which is a developer's file name and not
+# something a person should have to read.
 if [ "${1:-}" = "--debug" ]; then
   flet build apk "$STAGE" --project telegram_downloader.gui --module-name main \
+    --product "Telegram Downloader" \
     --arch "$APK_ARCH" --output "$PWD/build/apk" \
     --flutter-build-args=--debug --yes
 else
   flet build apk "$STAGE" --project telegram_downloader.gui --module-name main \
+    --product "Telegram Downloader" \
     --arch "$APK_ARCH" --output "$PWD/build/apk" --yes
 fi
 rm -rf "$STAGE"
@@ -217,8 +251,10 @@ if [ "${APK_BUILD_EMULATOR:-0}" = "1" ]; then
   cp -r src "$STAGE/src"
   rm -rf "$STAGE"/src/*.egg-info
   find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  stage_assets "$STAGE"
   flet build apk "$STAGE" --project telegram_downloader.gui \
-    --module-name main --arch "$APK_EMULATOR_ARCH" \
+    --module-name main --product "Telegram Downloader" \
+    --arch "$APK_EMULATOR_ARCH" \
     --output "$PWD/build/apk-emulator" --yes
   rm -rf "$STAGE"
   mkdir -p dist/apk-emulator

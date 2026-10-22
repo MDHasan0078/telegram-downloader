@@ -218,6 +218,12 @@ jobs:
         with: { python-version: "3.12" }
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with: { distribution: temurin, java-version: "17" }
+      # rsvg-convert rasterises the app's SVG icon into the PNG that flet
+      # can actually use. Without it flet silently falls back to Flutter's
+      # default icon, so the package would ship with the wrong icon and
+      # nothing would say so. The build script fails if this is missing.
+      - name: Install the SVG rasteriser
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin
       - name: Pin build timestamps
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
       # build-apk.sh installs Flet itself from requirements-flet.lock with

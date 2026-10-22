@@ -784,7 +784,13 @@ def get_dependencies() -> list:
             out.append({
                 "name": d.name,
                 "ok": bool(d.ok),
-                "applicable": "flet" not in name,
+                # Two rules, and both have to hold for the row to be
+                # shown: the shared list may say the dependency does not
+                # apply to this platform at all (ffmpeg and cryptg on a
+                # phone), and flet belongs to the DESKTOP app -- this one
+                # is Kotlin/Compose and never imports it.
+                "applicable": (bool(getattr(d, "applicable", True))
+                               and "flet" not in name),
                 "version": d.version or "",
                 "hint": _android_hint(d),
                 "install": _android_install(d),
