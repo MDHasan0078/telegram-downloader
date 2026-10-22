@@ -40,7 +40,7 @@ fun TgBottomBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = folder.ifEmpty { "(not set)" },
+            text = shortFolder(folder),
             color = c.ink,
             fontSize = Type.meta,
             maxLines = 1,
@@ -52,6 +52,29 @@ fun TgBottomBar(
             kind = TgButtonKind.Secondary,
             onClick = onChange,
         )
+    }
+}
+
+/**
+ * The path, shortened to what a person can read.
+ *
+ * The desktop shows "~/Downloads/Telegram": the head of a path is noise,
+ * the tail is the answer. An Android path is all head --
+ * "/storage/emulated/0/Android/data/<the package name>/files/..." -- so
+ * the same rule applies: the last two segments, and the rest as an
+ * ellipsis.
+ *
+ * The full path is not a tap away, and that is deliberate: a label that
+ * does something when you touch it, with nothing on screen to say so, is
+ * the same mistake as a button that only shows itself on hover.
+ */
+private fun shortFolder(path: String): String {
+    if (path.isEmpty()) return "(not set)"
+    val parts = path.trimEnd('/').split('/').filter { it.isNotEmpty() }
+    return when {
+        parts.isEmpty() -> path
+        parts.size <= 2 -> parts.joinToString("/")
+        else -> "…/" + parts.takeLast(2).joinToString("/")
     }
 }
 

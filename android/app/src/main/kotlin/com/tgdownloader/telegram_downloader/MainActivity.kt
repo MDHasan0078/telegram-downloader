@@ -1,7 +1,9 @@
 package com.tgdownloader.telegram_downloader
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -9,6 +11,7 @@ import android.os.Environment
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,17 +28,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chaquo.python.android.PyApplication
+import com.tgdownloader.telegram_downloader.TgPalette
+import com.tgdownloader.telegram_downloader.TgTheme
 import com.tgdownloader.telegram_downloader.ui.AddScreen
 import com.tgdownloader.telegram_downloader.ui.AuthScreen
 import com.tgdownloader.telegram_downloader.ui.Destination
 import com.tgdownloader.telegram_downloader.ui.OngoingScreen
 import com.tgdownloader.telegram_downloader.ui.SettingsScreen
 import com.tgdownloader.telegram_downloader.ui.TgBottomBar
-import com.tgdownloader.telegram_downloader.TgTheme
 import com.tgdownloader.telegram_downloader.ui.TgToast
 import com.tgdownloader.telegram_downloader.ui.TgTopBar
 import kotlinx.coroutines.delay
@@ -69,11 +74,49 @@ class TgApplication : PyApplication() {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // The system bars follow the APP's theme, not the system's: the
+        // app has its own light/dark switch and the system does not know
+        // about it. The dark theme is the one the app ships in, so that is
+        // what the first frame gets.
+        applySystemBars(dark = true)
         setContent {
             TgApp()
         }
     }
+}
+
+/**
+ * The system bars, in the app's theme.
+ *
+ * The window draws edge to edge, so the bars are transparent and the
+ * app's own page colour is behind them. Without this the navigation bar
+ * is a light slab under a dark app, with dark icons on it, and it cannot
+ * follow the app's own theme switch at all.
+ */
+private fun ComponentActivity.applySystemBars(dark: Boolean) {
+    val page = if (dark) TgPalette.Dark.page else TgPalette.Light.page
+    val scrim = page.toArgb()
+    val style = if (dark) {
+        SystemBarStyle.dark(scrim)
+    } else {
+        SystemBarStyle.light(scrim, scrim)
+    }
+    enableEdgeToEdge(
+        statusBarStyle = style,
+        navigationBarStyle = style,
+    )
+    // The area behind the bars is the WINDOW's background, not the app's:
+    // the app insets its own content, so the window is what shows under
+    // the system bars. It has to be the page colour, or the bars sit on
+    // a slab of whatever the platform theme was.
+    window.setBackgroundDrawable(ColorDrawable(scrim))
+}
+
+/** The activity behind this context, whatever wraps it. */
+private tailrec fun Context.findActivity(): ComponentActivity? = when (this) {
+    is ComponentActivity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 /**
@@ -86,6 +129,15 @@ class MainActivity : ComponentActivity() {
 fun TgApp() {
     val vm: TgViewModel = viewModel()
     val context = LocalContext.current
+
+    // The system bars are the app's own: when the theme is flipped, they
+    // are re-painted with it. The platform cannot do this on its own --
+    // it only knows the system's night mode, and this app has a switch of
+    // its own.
+    val activity = context.findActivity()
+    LaunchedEffect(vm.dark) {
+        activity?.applySystemBars(vm.dark)
+    }
 
     // The .txt batch file. The picker returns a content:// URI, not a
     // path, so the BYTES it returns are what gets read -- the same

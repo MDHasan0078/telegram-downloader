@@ -88,8 +88,15 @@ enum class TgButtonKind { Primary, Secondary, Quiet, Danger }
  * A labelled button.
  *
  * `kind`: "primary" (accent fill, the one affirmative action), "secondary"
- * (raised fill plus a hairline), "quiet" (no fill until touched) or
+ * (raised fill plus a hairline), "quiet" (no fill: a text button) or
  * "danger" (error-tinted text).
+ *
+ * `quiet` is for a DIALOG's cancel, where the platform's own convention
+ * is a text button -- never for a control on a page. A page control
+ * with no fill is not a control on a touch device: there is no hover to
+ * reveal it, so it reads as a label. "Clear finished" in the queue
+ * toolbar was exactly that, and it is now `secondary` like its
+ * neighbours.
  *
  * `busy` is the third rule made concrete: a button that awaits something
  * swaps its label for a spinner and is disabled while it runs, so a second

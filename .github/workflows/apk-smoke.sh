@@ -165,13 +165,54 @@ if [ "${TG_NATIVE_UI_ASSERT:-0}" = "1" ]; then
         ;;
     esac
   done
-  # Reported, not required: the wordmark is a text label in the bar, but
-  # whether it reaches the accessibility tree is a Compose detail, and the
-  # destinations above are the assertion that matters.
+  # The WORDMARK. It is required, and it is the string this job was
+  # missing.
+  #
+  # The brand is a FIXED slot at the left of the bar, outside the
+  # scrolling strip, so it cannot scroll out of view the way it used to:
+  # the strip scrolled the brand off the left edge and the bar opened on
+  # a bare "Add", with nothing on screen to say what the app was. A
+  # missing wordmark is that bug again.
+  #
+  # On a narrow bar the slot keeps only the MARK -- a phone is 420dp
+  # wide and the wordmark is 124dp of it -- and the mark carries the name
+  # as its accessibility label. So the name is looked for in the whole
+  # tree rather than in text="" only: on a phone it arrives as a
+  # content-desc, on a wide bar as a text label.
   case "$UI" in
-    *"Telegram Downloader"*) echo "  the UI shows: the wordmark" ;;
-    *) echo "  (the wordmark is not in the accessibility tree -- noted, not required)" ;;
+    *"Telegram Downloader"*)
+      echo "  the UI shows: the wordmark"
+      ;;
+    *)
+      echo "::error::the UI does not show the wordmark (\"Telegram Downloader\")"
+      echo "::error::the bar's brand slot is missing, or the scrolling strip has"
+      echo "::error::pushed it off the left edge again"
+      exit 1
+      ;;
   esac
+
+  # ...and it is at the LEFT of the bar, in front of the destinations,
+  # not somewhere in the middle of the strip. uiautomator writes every
+  # node's bounds, so this compares the wordmark's left edge with the
+  # first destination's: the wordmark is the brand, and the brand is
+  # first. The comparison is relative, so it does not care what the
+  # screen's density is.
+  BRAND_LEFT="$(printf '%s' "$UI" | tr '<' '\n' | grep 'Telegram Downloader' \
+    | head -1 | grep -o 'bounds="\[[0-9]*' | tr -dc '0-9')"
+  ADD_LEFT="$(printf '%s' "$UI" | tr '<' '\n' | grep 'text="Add"' \
+    | head -1 | grep -o 'bounds="\[[0-9]*' | tr -dc '0-9')"
+  if [ -z "$BRAND_LEFT" ]; then
+    echo "::error::the wordmark is in the tree but has no bounds: it is not on screen"
+    exit 1
+  fi
+  if [ -n "$ADD_LEFT" ] && [ "$BRAND_LEFT" -ge "$ADD_LEFT" ]; then
+    echo "::error::the wordmark starts at x=$BRAND_LEFT, and the first"
+    echo "::error::destination starts at x=$ADD_LEFT: the wordmark is not at the"
+    echo "::error::left of the bar, it is in the strip with the destinations"
+    exit 1
+  fi
+  echo "  the wordmark is at the left of the bar (x=$BRAND_LEFT, the first"\
+"    destination at x=$ADD_LEFT)"
 
   # Every screen, not just the one the app opens on.
   #

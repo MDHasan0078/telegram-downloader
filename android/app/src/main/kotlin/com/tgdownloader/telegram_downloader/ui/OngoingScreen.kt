@@ -4,8 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,7 +34,6 @@ import kotlinx.coroutines.delay
  * A row is a LINE of the list, not a card: the status dot leads it, the
  * title sits above the detail, and a hairline separates the rows.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun OngoingScreen(vm: TgViewModel) {
     val c = tgColors()
@@ -83,27 +80,38 @@ fun OngoingScreen(vm: TgViewModel) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // The buttons wrap instead of running off the screen: a phone
-            // is narrower than a desktop window.
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(Space.s2),
-                verticalArrangement = Arrangement.spacedBy(Space.s2),
-            ) {
-                TgButton(
-                    text = "Clear finished",
-                    kind = TgButtonKind.Quiet,
-                    onClick = vm::clearFinished,
-                )
-                TgButton(
-                    text = "Resume all / Start",
-                    kind = TgButtonKind.Secondary,
-                    onClick = vm::startQueue,
-                )
-                TgButton(
-                    text = "Cancel batch",
-                    kind = TgButtonKind.Secondary,
-                    onClick = vm::cancelBatch,
-                )
+            // The three actions, as ONE group.
+            //
+            // They are the desktop's three, in the desktop's order, and
+            // they are all FILLED: a quiet button is a hover affordance,
+            // and a phone has no hover -- as a bare label, "Clear
+            // finished" is not a control at all.
+            //
+            // They do not fit on one line here: the labels are 270dp of
+            // text and the buttons are another 120, on a 363dp bar. So
+            // the two that belong together -- the batch, which is
+            // started or stopped -- share a line, and the housekeeping
+            // one has a line of its own. That is a decision, not a wrap.
+            Column(verticalArrangement = Arrangement.spacedBy(Space.s2)) {
+                Row {
+                    TgButton(
+                        text = "Clear finished",
+                        kind = TgButtonKind.Secondary,
+                        onClick = vm::clearFinished,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
+                    TgButton(
+                        text = "Resume all / Start",
+                        kind = TgButtonKind.Secondary,
+                        onClick = vm::startQueue,
+                    )
+                    TgButton(
+                        text = "Cancel batch",
+                        kind = TgButtonKind.Secondary,
+                        onClick = vm::cancelBatch,
+                    )
+                }
             }
         }
 

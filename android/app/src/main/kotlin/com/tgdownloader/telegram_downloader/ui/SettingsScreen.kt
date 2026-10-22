@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,6 +37,12 @@ fun SettingsScreen(vm: TgViewModel, onInstallUpdate: () -> Unit = {}) {
 
     TgPage {
         // -- Dependencies
+        //
+        // This is the ANDROID list, built by the engine's bridge: ffmpeg
+        // and cryptg are genuinely missing here and the app says so. The
+        // flet row is in the list too, but it is marked as not applying
+        // to this platform -- the desktop app really does ship flet, and
+        // this one is Kotlin/Compose and never imports it.
         TgSectionLabel("Dependencies")
         if (vm.dependencies.isEmpty()) {
             Text(
@@ -47,6 +52,11 @@ fun SettingsScreen(vm: TgViewModel, onInstallUpdate: () -> Unit = {}) {
             )
         }
         for (dep in vm.dependencies) {
+            // A dependency that does not apply to this platform is not
+            // shown: there is nothing the user can do about it here, and
+            // a red MISSING badge for it would be a false alarm about
+            // something the app cannot use and cannot install.
+            if (!dep.applicable) continue
             DependencyLine(dep)
         }
         TgButton(
@@ -202,11 +212,19 @@ private fun UpdateSection(vm: TgViewModel, onInstallUpdate: () -> Unit) {
 }
 
 /**
- * One dependency row: the status dot, the name, the version and the badge.
+ * One dependency row: the status dot, the name and the description, and
+ * the version and the badge.
  *
- * A MISSING row gets its own line with the truth about this platform --
- * above all, that ffmpeg cannot be installed on Android, so the Fast and
- * Max modes are off.
+ * This is the desktop's row, in the desktop's order: the dot, the
+ * middle (which takes the space that is left over) and a trailing box
+ * with the version and the badge. The desktop's difference is that its
+ * descriptions are one line; on a phone they are paragraphs.
+ *
+ * The one thing that had to change is the ALIGNMENT. The trailing box
+ * sits at the TOP of the row, beside the name, and not in the middle of
+ * it: a description that is four lines tall, with the version and the
+ * badge centred against it, puts them in the middle of the paragraph
+ * and the two run into each other.
  */
 @Composable
 private fun DependencyLine(dep: DependencyRow) {
@@ -215,12 +233,13 @@ private fun DependencyLine(dep: DependencyRow) {
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Space.s1),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Space.s3),
+            verticalAlignment = Alignment.Top,
+        ) {
             TgStatusDot(if (dep.ok) "done" else "failed")
             Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(start = Space.s3),
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(Space.s1),
             ) {
                 Text(
@@ -232,26 +251,28 @@ private fun DependencyLine(dep: DependencyRow) {
                 if (dep.hint.isNotEmpty()) {
                     Text(text = dep.hint, color = c.muted, fontSize = Type.meta)
                 }
+                if (!dep.ok && dep.install.isNotEmpty()) {
+                    Text(text = dep.install, color = c.muted, fontSize = Type.meta)
+                }
             }
-            Text(
-                text = dep.version.ifEmpty { "not detected" },
-                color = c.muted,
-                fontSize = Type.meta,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            TgBadge(
-                text = if (dep.ok) "OK" else "MISSING",
-                tone = if (dep.ok) TgTone.Ok else TgTone.Error,
-            )
-        }
-        if (!dep.ok && dep.install.isNotEmpty()) {
-            Text(
-                text = dep.install,
-                color = c.muted,
-                fontSize = Type.meta,
-                modifier = Modifier.padding(start = Space.s3 + Space.s3),
-            )
+            // The trailing box: the version and the badge, at the top of
+            // the row so that they line up with the name.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Space.s2),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text(
+                    text = dep.version.ifEmpty { "not detected" },
+                    color = c.muted,
+                    fontSize = Type.meta,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                TgBadge(
+                    text = if (dep.ok) "OK" else "MISSING",
+                    tone = if (dep.ok) TgTone.Ok else TgTone.Error,
+                )
+            }
         }
         TgHairline()
     }

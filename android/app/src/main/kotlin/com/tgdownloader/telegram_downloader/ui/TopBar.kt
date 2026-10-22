@@ -6,29 +6,27 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.tgdownloader.telegram_downloader.Radius
@@ -45,6 +43,23 @@ enum class Destination(val key: String, val title: String) {
 }
 
 /**
+ * The window width at which the bar shows the FULL wordmark.
+ *
+ * 600dp is not a taste, it is the arithmetic of the desktop's bar: the
+ * brand (141dp: the mark, the gap and the name), the divider and the
+ * two gaps around it (17dp), the four destinations and the theme toggle
+ * with their gaps (388dp), and the window gutter (48dp) -- 594dp. At
+ * 600dp the whole bar fits on one line, which is exactly what the
+ * desktop shows.
+ *
+ * A phone is 420dp wide, and the wordmark alone is 124dp of it: 30% of
+ * the screen for a label, with five things to reach besides it. Below
+ * this width the bar keeps the MARK and gives the rest to the
+ * destinations.
+ */
+private val fullWordmarkWidth = 600.dp
+
+/**
  * The top bar: the brand, the tab strip, and the theme toggle.
  *
  * The bar IS the navigation, and there is no per-page heading: the chip
@@ -59,8 +74,14 @@ enum class Destination(val key: String, val title: String) {
  * The theme toggle sits in the gap because it is chrome, not a destination,
  * and it gets air on both sides so it never reads as a fifth tab.
  *
- * On a phone the row is wider than the screen, so it scrolls -- and the
- * selected chip is scrolled back into view when the destination changes.
+ * THE BRAND IS A FIXED SLOT, outside the scrolling strip, and that is
+ * the whole point of it. The brand used to be the first thing IN the
+ * strip, and the strip scrolled it off the left edge: the bar opened on
+ * a bare "Add", with nothing on screen to say what the app was. A
+ * wordmark that can scroll out of view is not a wordmark.
+ *
+ * The destinations scroll in what is left, and the selected one is
+ * brought back into view when the destination changes.
  */
 @Composable
 fun TgTopBar(
@@ -72,68 +93,80 @@ fun TgTopBar(
 ) {
     val c = tgColors()
     val scroll = rememberScrollState()
-    val chipOffsets = remember { mutableStateMapOf<String, Float>() }
-    val chipWidths = remember { mutableStateMapOf<String, Int>() }
-    var viewport by remember { mutableStateOf(0) }
 
-    LaunchedEffect(selected, chipOffsets.size) {
-        val x = chipOffsets[selected.key] ?: return@LaunchedEffect
-        val w = chipWidths[selected.key] ?: 0
-        if (x < scroll.value || x + w > scroll.value + viewport) {
-            // ScrollState.animateScrollTo takes an Int in this Compose
-            // version -- it is `animateScrollTo(value: Int, ...)`, and the
-            // Float overload is not there. The offset is a Float because
-            // positionInParent().x is, so it is truncated here.
-            scroll.animateScrollTo(x.toInt())
-        }
-    }
-
-    Row(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .background(c.page)
-            .onSizeChanged { viewport = it.width }
-            .padding(horizontal = Space.pagePad, vertical = Space.s2),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(c.page),
     ) {
+        // A narrow bar cannot afford the name: it keeps the mark, and the
+        // destinations get the screen. A wide one shows the desktop's bar
+        // exactly.
+        val fullWordmark = maxWidth >= fullWordmarkWidth
+
         Row(
             modifier = Modifier
-                .weight(1f)
-                .horizontalScroll(scroll),
+                .fillMaxWidth()
+                .padding(horizontal = Space.pagePad, vertical = Space.s2),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Space.s2),
         ) {
-            TgBrand()
-            TgHairline(vertical = true)
-            Destination.Add.chip(selected, onSelect, chipOffsets, chipWidths)
-            Destination.Ongoing.chip(selected, onSelect, chipOffsets, chipWidths)
-            // The gap the desktop bar flexes: on a phone it is a fixed
-            // space, so the theme toggle keeps its air on both sides.
-            Box(modifier = Modifier.size(Space.s2))
-            TgThemeToggle(dark = dark, onToggleTheme = onToggleTheme)
-            Destination.Auth.chip(selected, onSelect, chipOffsets, chipWidths)
-            Destination.Settings.chip(selected, onSelect, chipOffsets, chipWidths)
+            // The brand never scrolls.
+            TgBrand(fullWordmark = fullWordmark)
+
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(scroll),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Space.s2),
+            ) {
+                Destination.Add.chip(selected, onSelect)
+                Destination.Ongoing.chip(selected, onSelect)
+                // The gap the desktop bar flexes: on a phone it is a fixed
+                // space, so the theme toggle keeps its air on both sides.
+                Box(modifier = Modifier.size(Space.s2))
+                TgThemeToggle(dark = dark, onToggleTheme = onToggleTheme)
+                Destination.Auth.chip(selected, onSelect)
+                Destination.Settings.chip(selected, onSelect)
+            }
         }
     }
 }
 
-/** One destination chip, wired to the bar's scroll bookkeeping. */
+/**
+ * One destination chip.
+ *
+ * The chip asks to be brought into view when it becomes the selected
+ * one, and Compose's own relocation API does the scrolling: it moves
+ * the strip by the minimum that puts the chip on screen and not one
+ * pixel more.
+ *
+ * The old hand-rolled arithmetic -- `positionInParent()` plus a
+ * viewport width -- was the bug. It asked the strip to scroll to the
+ * selected chip's LEFT EDGE, which for the chip near the end of the
+ * strip is further right than the strip can go: the strip ran to its
+ * end, and the brand, which was the first thing in it, went off the
+ * left edge with it.
+ */
 @Composable
 private fun Destination.chip(
     selected: Destination,
     onSelect: (Destination) -> Unit,
-    offsets: MutableMap<String, Float>,
-    widths: MutableMap<String, Int>,
 ) {
     val c = tgColors()
     val shape = RoundedCornerShape(Radius.sm)
     val isSelected = this == selected
+    val requester = remember { BringIntoViewRequester() }
+
+    // The selected destination is always on screen.
+    LaunchedEffect(isSelected) {
+        if (isSelected) requester.bringIntoView()
+    }
+
     Box(
         modifier = Modifier
-            .onGloballyPositioned {
-                offsets[key] = it.positionInParent().x
-                widths[key] = it.size.width
-            }
+            .bringIntoViewRequester(requester)
             .clip(shape)
             .background(if (isSelected) c.raised else Color.Transparent)
             .border(
@@ -153,28 +186,58 @@ private fun Destination.chip(
     }
 }
 
-/** The wordmark: the mark and the name. */
+/**
+ * The brand: the mark, and -- when the bar is wide enough for it -- the
+ * name and the divider that separates the brand from the destinations.
+ *
+ * This is the desktop's brand, in the desktop's order. It is a fixed
+ * slot, so it is always on screen.
+ */
 @Composable
-private fun TgBrand() {
+private fun TgBrand(fullWordmark: Boolean) {
     val c = tgColors()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Space.s2),
     ) {
-        Box(
-            modifier = Modifier
-                .size(9.dp)
-                .rotate(45f)
-                .clip(RoundedCornerShape(1.dp))
-                .background(c.accent),
-        )
-        Text(
-            text = "Telegram Downloader",
-            color = c.ink,
-            fontSize = Type.title,
-            fontWeight = FontWeight.SemiBold,
-        )
+        TgBrandMark(announce = !fullWordmark)
+        if (fullWordmark) {
+            Text(
+                text = "Telegram Downloader",
+                color = c.ink,
+                fontSize = Type.title,
+                fontWeight = FontWeight.SemiBold,
+            )
+            // The desktop's divider between the brand and the destinations.
+            TgHairline(vertical = true)
+        }
     }
+}
+
+/**
+ * The mark: the app's accent square, turned.
+ *
+ * When the name is not on screen the mark carries it as its
+ * accessibility label, so the brand is still announced -- and so the
+ * launcher can see that the bar has a wordmark.
+ */
+@Composable
+private fun TgBrandMark(announce: Boolean) {
+    val c = tgColors()
+    Box(
+        modifier = Modifier
+            .size(9.dp)
+            .rotate(45f)
+            .clip(RoundedCornerShape(1.dp))
+            .background(c.accent)
+            .then(
+                if (announce) {
+                    Modifier.semantics { contentDescription = "Telegram Downloader" }
+                } else {
+                    Modifier
+                }
+            ),
+    )
 }
 
 /** The theme toggle: chrome, not a destination. */

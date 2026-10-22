@@ -766,15 +766,25 @@ def get_dependencies() -> list:
     are for a desktop, so they are replaced here with what is actually true
     on Android -- above all that ffmpeg is NOT available, which is why the
     Fast and Max modes cannot work.
+
+    A dependency that does not apply to this platform AT ALL is marked
+    `applicable: False` rather than dropped. The flet row is the one: the
+    desktop app really does ship flet (the .deb carries it for
+    `tg-dl gui --flet` and for the web build), and its MISSING badge is
+    correct there. This app is Kotlin/Compose and never imports flet, so
+    the row is a false alarm here -- and the native screen does not show
+    a row that says so. The desktop's own list is untouched.
     """
     from . import deps as deps_mod
 
     def _check() -> list:
         out = []
         for d in deps_mod.check_all():
+            name = (d.name or "").lower()
             out.append({
                 "name": d.name,
                 "ok": bool(d.ok),
+                "applicable": "flet" not in name,
                 "version": d.version or "",
                 "hint": _android_hint(d),
                 "install": _android_install(d),

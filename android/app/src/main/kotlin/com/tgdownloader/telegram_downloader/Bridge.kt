@@ -52,6 +52,14 @@ data class DependencyRow(
     val hint: String = "",
     val install: String = "",
     val required: Boolean = false,
+    /**
+     * False for a dependency that does not apply to this platform at
+     * all: the flet row belongs to the desktop app -- the .deb ships
+     * flet for `tg-dl gui --flet` and for the web build -- and this app
+     * is Kotlin/Compose and never imports it. There is nothing the user
+     * can do about it here, so the screen does not show it.
+     */
+    val applicable: Boolean = true,
 )
 
 /** What this build can actually do. */
@@ -381,6 +389,7 @@ object Bridge {
                 hint = o.optString("hint"),
                 install = o.optString("install"),
                 required = o.optBoolean("required"),
+                applicable = o.optBoolean("applicable", true),
             )
         }
     }

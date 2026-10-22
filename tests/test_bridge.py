@@ -250,6 +250,34 @@ def test_dependencies_say_the_truth_about_ffmpeg(tmp_path):
     assert caps["modes"] == (["1", "2", "3"] if caps["ffmpeg"] else ["1"])
 
 
+def test_the_android_dependency_list_marks_flet_as_not_applicable(tmp_path):
+    """flet is not one of the native app's dependencies.
+
+    The app is Kotlin/Compose and never imports flet, so a red MISSING
+    badge for it in the Settings list would be a false alarm about
+    something the app cannot use and cannot install.
+
+    The row is not thrown away: it belongs to the desktop app, which
+    really does ship flet (the .deb carries it for `tg-dl gui --flet` and
+    for the web build), and the desktop's own list is untouched. The
+    Android list says which of its rows apply here, and the native
+    screen leaves the ones that do not out of the list it shows.
+    """
+    data = _run(tmp_path)
+    flet = [d for d in data["deps"] if "flet" in d["name"].lower()]
+    assert len(flet) == 1, data["deps"]
+    assert not flet[0]["applicable"]
+    assert "Android" in flet[0]["hint"]
+    # Everything else applies, and the rows that do are the ones the
+    # app really has to answer for.
+    others = [d for d in data["deps"] if "flet" not in d["name"].lower()]
+    assert others and all(d["applicable"] for d in others), others
+    # The DESKTOP's list is untouched: it still has the row, because the
+    # .deb ships flet for `tg-dl gui --flet` and for the web build.
+    from telegram_downloader import deps as deps_mod
+    assert any("flet" in d.name.lower() for d in deps_mod.check_all())
+
+
 def test_the_update_download_picks_the_android_package(tmp_path):
     """On Android the app must fetch the .apk, not the desktop .deb.
 

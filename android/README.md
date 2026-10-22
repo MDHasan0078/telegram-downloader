@@ -32,6 +32,70 @@ Chaquopy's source set at the repository's `src/`, so the APK ships exactly
 the engine the desktop app ships, and a fix in `src/telegram_downloader/`
 reaches the phone without a second copy to keep in sync.
 
+## The top bar
+
+The bar is the navigation: the brand, the four destinations and the theme
+toggle, in the desktop's order. Two things about it are not the desktop's:
+
+**The brand is a fixed slot, outside the scrolling strip.** The
+destinations are wider than a phone, so the strip scrolls -- and a
+wordmark inside a scrolling strip is a wordmark that scrolls away. The
+brand sits in its own slot at the left of the bar and cannot move.
+
+**On a narrow bar the wordmark is the mark alone.** The name is 124dp of
+a 420dp phone: 30% of the screen for a label, with five things to reach
+beside it. So below 600dp -- the width at which the desktop's whole bar
+fits on one line -- the slot keeps only the accent mark, which carries
+the name as its accessibility label. At 600dp and above the bar shows
+the desktop's brand exactly: mark, name, divider.
+
+When the destination changes, the selected chip is brought back into
+view by Compose's own relocation API (`BringIntoViewRequester`), which
+scrolls the strip by the minimum that puts the chip on screen.
+
+## The layout on a phone
+
+The GTK app is the reference, and the desktop's window is 1180dp wide. A
+phone is 420dp, and the places where that shows are all decided the
+same way: **the desktop's arrangement, or the phone's -- never a
+half-measure in between.**
+
+**The system bars belong to the app.** `enableEdgeToEdge()` on its own
+follows the *system's* night mode, so the navigation bar came up as a
+light slab under the dark app, with dark icons on it. The bars are now
+painted with the app's own theme -- and repainted when the theme is
+flipped -- and the window behind them is the app's page colour.
+
+**A control with no fill is not a control.** A "quiet" button is a
+*hover* affordance, and a phone has no hover: "Clear finished" was a
+bare label next to two filled buttons. It is filled now, like its
+neighbours, and the three queue actions are one group with one
+alignment. They do not fit on one line -- the labels are 270dp of text
+on a 363dp bar -- so the two that belong together (start the batch or
+stop it) share a line and the housekeeping one has a line of its own.
+
+**The dependency rows are the desktop's rows.** The dot, the middle
+(which takes the space that is left over) and a trailing box with the
+version and the badge -- the same three parts, in the same order, as
+`gtk/views/settings.py`. The one thing that had to change is the
+alignment: the trailing box sits at the **top** of the row, beside the
+name, and not in the middle of it. A phone's description is a paragraph,
+and a version centred against a paragraph lands in the middle of it and
+the two run into each other.
+
+**A dependency that does not apply here is not shown.** The flet row
+belongs to the desktop app -- the .deb ships flet for `tg-dl gui --flet`
+and for the web build, and its MISSING badge is correct there. The
+Android list marks the rows that do not apply to this platform, and the
+screen leaves those out: a red MISSING badge for something the app
+cannot use and cannot install is a false alarm.
+
+**The bottom bar says where the downloads go, in words.** The raw
+Android path is 80 characters of `/storage/emulated/0/Android/data/
+<the package name>/`, so the bar shows the last two segments with an
+ellipsis in front -- the same rule as the desktop's `~/Downloads/
+Telegram`, which shows two segments after the `~`.
+
 ## Building
 
 There is no Gradle wrapper in this directory. A wrapper is a binary jar
