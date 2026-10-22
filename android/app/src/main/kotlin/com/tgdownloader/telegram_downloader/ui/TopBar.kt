@@ -60,6 +60,22 @@ enum class Destination(val key: String, val title: String) {
 private val fullWordmarkWidth = 600.dp
 
 /**
+ * The width at which the chips get the desktop's roomy padding.
+ *
+ * On a phone the four destinations and the theme toggle are about
+ * 350dp of chip, and the space they have is about 350dp as well: the
+ * last one hangs off the end of the strip. So the bar scrolls to reach
+ * "Settings", and a chip that is half off the strip's left edge shows
+ * the last letter of its label -- a bare "d" from "Add" -- sitting
+ * next to the brand mark.
+ *
+ * The tighter padding is 4dp a side, which across four chips is 32dp:
+ * the difference between fitting and not. The desktop's padding is
+ * roomy because a desktop window has the room.
+ */
+private val roomyChipsWidth = 600.dp
+
+/**
  * The top bar: the brand, the tab strip, and the theme toggle.
  *
  * The bar IS the navigation, and there is no per-page heading: the chip
@@ -103,6 +119,9 @@ fun TgTopBar(
         // destinations get the screen. A wide one shows the desktop's bar
         // exactly.
         val fullWordmark = maxWidth >= fullWordmarkWidth
+        // And a narrow bar cannot afford the desktop's padding either:
+        // with it, the last destination hangs off the end of the strip.
+        val roomyChips = maxWidth >= roomyChipsWidth
 
         Row(
             modifier = Modifier
@@ -121,14 +140,14 @@ fun TgTopBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(Space.s2),
             ) {
-                Destination.Add.chip(selected, onSelect)
-                Destination.Ongoing.chip(selected, onSelect)
+                Destination.Add.chip(selected, onSelect, roomyChips)
+                Destination.Ongoing.chip(selected, onSelect, roomyChips)
                 // The gap the desktop bar flexes: on a phone it is a fixed
                 // space, so the theme toggle keeps its air on both sides.
                 Box(modifier = Modifier.size(Space.s2))
                 TgThemeToggle(dark = dark, onToggleTheme = onToggleTheme)
-                Destination.Auth.chip(selected, onSelect)
-                Destination.Settings.chip(selected, onSelect)
+                Destination.Auth.chip(selected, onSelect, roomyChips)
+                Destination.Settings.chip(selected, onSelect, roomyChips)
             }
         }
     }
@@ -153,6 +172,7 @@ fun TgTopBar(
 private fun Destination.chip(
     selected: Destination,
     onSelect: (Destination) -> Unit,
+    roomy: Boolean,
 ) {
     val c = tgColors()
     val shape = RoundedCornerShape(Radius.sm)
@@ -175,7 +195,10 @@ private fun Destination.chip(
                 shape,
             )
             .clickable { onSelect(this) }
-            .padding(horizontal = Space.s3, vertical = Space.s1 + 2.dp),
+            .padding(
+                horizontal = if (roomy) Space.s3 else Space.s2,
+                vertical = Space.s1 + 2.dp,
+            ),
     ) {
         Text(
             text = title,
@@ -188,10 +211,18 @@ private fun Destination.chip(
 
 /**
  * The brand: the mark, and -- when the bar is wide enough for it -- the
- * name and the divider that separates the brand from the destinations.
+ * name.
  *
  * This is the desktop's brand, in the desktop's order. It is a fixed
  * slot, so it is always on screen.
+ *
+ * The divider is NOT inside the "wide enough" branch. On a phone the
+ * strip is a couple of dp wider than the space it has, so it scrolls,
+ * and a chip that is half off its left edge shows the last letter of
+ * its label -- a bare "d" from "Add" -- right next to the mark. With
+ * the divider there, that letter is on the other side of a rule and
+ * reads as a chip the strip is part-way through, which is what it is.
+ * The desktop has the same divider in the same place.
  */
 @Composable
 private fun TgBrand(fullWordmark: Boolean) {
@@ -208,9 +239,9 @@ private fun TgBrand(fullWordmark: Boolean) {
                 fontSize = Type.title,
                 fontWeight = FontWeight.SemiBold,
             )
-            // The desktop's divider between the brand and the destinations.
-            TgHairline(vertical = true)
         }
+        // The desktop's divider between the brand and the destinations.
+        TgHairline(vertical = true)
     }
 }
 

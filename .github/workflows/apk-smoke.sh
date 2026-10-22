@@ -214,6 +214,30 @@ if [ "${TG_NATIVE_UI_ASSERT:-0}" = "1" ]; then
   echo "  the wordmark is at the left of the bar (x=$BRAND_LEFT, the first"\
 "    destination at x=$ADD_LEFT)"
 
+  # All four destinations, on screen AT ONCE.
+  #
+  # The chip strip was a couple of dp too wide for a phone, so the last
+  # destination hung off the end: the bar had to scroll to reach
+  # "Settings", and a chip that was half off the strip's left edge showed
+  # the last letter of its label -- a bare "d" from "Add" -- sitting
+  # next to the brand mark.
+  #
+  # uiautomator reports only what is on screen, so all four being in
+  # ONE tree means the bar fits the screen without scrolling.
+  OFFSCREEN=""
+  for NEEDLE in "Add" "Ongoing" "Account auth" "Settings"; do
+    case "$UI" in
+      *"$NEEDLE"*) ;;
+      *) OFFSCREEN="$OFFSCREEN $NEEDLE" ;;
+    esac
+  done
+  if [ -n "$OFFSCREEN" ]; then
+    echo "::error::these destinations are not on screen at once:$OFFSCREEN"
+    echo "::error::the bar's chip strip is wider than the screen, so it scrolls"
+    exit 1
+  fi
+  echo "  all four destinations are on screen at once"
+
   # Every screen, not just the one the app opens on.
   #
   # The bar is on every screen, so a bar that is wrong is wrong on all
