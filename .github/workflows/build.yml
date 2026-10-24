@@ -463,7 +463,11 @@ jobs:
         # colours are on it, and how red it is. That is how "the app shows
         # Flet's red error panel instead of its UI" becomes a build failure
         # rather than something a human has to notice.
-        run: sudo apt-get install -y -qq imagemagick
+        # Update the apt cache first: ubuntu-latest runners arrive with
+        # a stale index whose package URLs 404 (seen on the ghostscript
+        # delegate that ImageMagick pulls in). Installing without an update
+        # is a gamble that fails the whole release job when it happens.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
       - name: Boot an emulator and launch the app
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
