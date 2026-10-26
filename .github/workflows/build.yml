@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
       - name: Verify vendored wheels
         run: ( cd wheels && sha256sum -c --quiet SHA256SUMS )
@@ -140,7 +140,7 @@ jobs:
           persist-credentials: false
       # This job has the widest install base (every Debian/Ubuntu user), so it
       # must not build against whatever python ubuntu-latest happens to ship.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
       - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -214,9 +214,9 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
           grep -E "^version = \"$VERSION\"$" pyproject.toml
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with: { distribution: temurin, java-version: "17" }
       # rsvg-convert rasterises the app's SVG icon into the PNG that flet
       # can actually use. Without it flet silently falls back to Flutter's
@@ -508,9 +508,9 @@ jobs:
       # Chaquopy runs pip at BUILD time with a Python whose major.minor must
       # match the app's. 3.12 is what requirements-runtime.lock pins, so the
       # .apk and the .deb ship the same telethon.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with: { distribution: temurin, java-version: "17" }
       - name: Set up the Android SDK
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
