@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
       - name: Verify vendored wheels
         run: ( cd wheels && sha256sum -c --quiet SHA256SUMS )
@@ -140,7 +140,7 @@ jobs:
           persist-credentials: false
       # This job has the widest install base (every Debian/Ubuntu user), so it
       # must not build against whatever python ubuntu-latest happens to ship.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
       - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -214,9 +214,9 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           sed -i "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" src/telegram_downloader/__init__.py
           grep -E "^version = \"$VERSION\"$" pyproject.toml
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with: { distribution: temurin, java-version: "17" }
       # rsvg-convert rasterises the app's SVG icon into the PNG that flet
       # can actually use. Without it flet silently falls back to Flutter's
@@ -508,9 +508,9 @@ jobs:
       # Chaquopy runs pip at BUILD time with a Python whose major.minor must
       # match the app's. 3.12 is what requirements-runtime.lock pins, so the
       # .apk and the .deb ship the same telethon.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.12" }
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with: { distribution: temurin, java-version: "17" }
       - name: Set up the Android SDK
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
@@ -531,7 +531,7 @@ jobs:
       # that cannot be reviewed), so the exact Gradle version is pinned here
       # instead. AGP 8.13.2 needs Gradle 8.13 and JDK 17.
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: "8.13"
       # The version the app reports, stamped from the tag.
@@ -877,7 +877,7 @@ jobs:
             echo "no existing release for $GITHUB_REF_NAME"
           fi
       - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: "${{ github.ref_name }}"
           # The body is PREPENDED to GitHub's generated notes (that is what
