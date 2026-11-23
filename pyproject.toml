@@ -33,7 +33,7 @@ dependencies = [
   # scripts/build-dmg.sh assert that this pin equals the one in
   # requirements-runtime.lock and the one vendored in wheels/, so it cannot go
   # stale unnoticed. Bump it here, there and in wheels/ together.
-  "telethon==1.45.0",
+  "telethon==1.46.0",
 ]
 
 [project.optional-dependencies]
